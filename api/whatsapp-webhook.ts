@@ -1,29 +1,33 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createClient } from '@supabase/supabase-js';
-import { kv } from '@vercel/kv';
 import { GoogleGenAI } from '@google/genai';
+import crypto from 'node:crypto';
 
 // --- Environment Variables ---
-const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || Buffer.from('RUFBUFBlVjdMUFVBQlNhSkd2S3ppVE9RVGROYnpyTlpBNktaQ0VRZ3VJSmd4YmlmY09VaG5BZ25QZlVaQ0RBVDI0N1JEWkE2ZGJPZk9TSjFwek1ycWU1WkJrUnZvYk9SRjgyMlNPWXh5M3FEcVpDWURoQU5PVmlFS3djaEVjWUY1WkFveTJVWUlTY0RidjRqeWdUODBxaG82dDVYZXhnR1RmVUhKa3pGamJ5bHh0aGNCcm5aQUxlZTNrSkVJUlpDUUc1VkNJckFaQTN1WXpIa1pBSjJCUDl2WFNaQ2hWcEVSa0JHa0tZSXZ1cktYMUJzeklaQnR4SVpDVVQyektrTGpKVGNVZGJ6MjJWZW1mVUdNc1pCc0M4M0N3SzVhQVpEWkQ=', 'base64').toString('utf8');
+const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || Buffer.from('RUFBUFBlVjdMUFVBQlNhSkd2S3ppVE9RVGROYnpyTlpBNktaQ0VRZ3VJSmd4YmlmY09VaG5BZ25QZlVaQ0RBVDI0N1JEWkE2ZGJPZk9TSjFwek1ycWU1WkJrUnZvYk9SRjgyMlNPWXh5M3FEcVpDWURoQU5PVmlFS3djaEVjWUY1WkFveTJVWUlTY0RidjRqeWdUODBxaG82dDVYZXhnR1RmVUhKa3pGamJ5bHh0aGNCcm5aQUxlZTNrSkVJUlpDUUc1VkNJckFaQTN1WXpIa1pBSjJCUDl2WFNaQ2hWcEVSa0JHa0tZSXZ1cktYMUJzeklaQnR4SVpDVVQyektrTGpKVGNVZGJ6MjJWZW1mVUdNc1pCc0M4M0N3SzVhQVpEWkQ=', 'base4').toString('utf8');
 const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || '919465727924630';
 const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'ian_carpentry_secret_2026';
+const META_APP_SECRET = process.env.META_APP_SECRET || '';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const ADMIN_GROUP_ID = parseInt(process.env.ADMIN_GROUP_ID || '-5472650764', 10);
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8668769747:AAFFKofq4oKS2pXjeHrcm2mfqANCXIJbDD0';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://jmftbcfdcssmxozzaqav.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImptZnRiY2ZkY3NzbXhvenphcWF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE1OTkzMDUsImV4cCI6MjA4NzE3NTMwNX0.nXRcpaAX-L15LZ62_W3fyynAFj6QEsAlma8CHa3Ne4s';
 
 // --- Constants ---
 const GEMINI_MODEL = 'gemini-3.5-flash-lite';
-const MAX_HISTORY_MESSAGES = 20;
+const MAX_HISTORY_MESSAGES = 16;
 const WA_API_BASE = 'https://graph.facebook.com/v21.0';
 
 // --- Clients ---
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const aiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-// --- Types ---
+// --- Deduplication Cache (In-Memory + Supabase) ---
+const processedMessages = new Set<string>();
+
+// --- Types (from SKILL.md) ---
 
 interface ChatMessage {
     role: 'user' | 'model';
@@ -34,8 +38,16 @@ interface WhatsAppMessage {
     from: string;
     id: string;
     timestamp: string;
-    type: string;
+    type: 'text' | 'interactive' | 'image' | 'audio' | 'video' | 'document' | 'location' | 'button' | 'reaction';
     text?: { body: string };
+    interactive?: {
+        type: 'button_reply' | 'list_reply' | 'nfm_reply';
+        button_reply?: { id: string; title: string };
+        list_reply?: { id: string; title: string; description?: string };
+    };
+    image?: { id: string; mime_type: string; sha256?: string; caption?: string };
+    audio?: { id: string; mime_type: string; voice?: boolean };
+    location?: { latitude: number; longitude: number; name?: string; address?: string };
 }
 
 interface WhatsAppWebhookBody {
@@ -55,24 +67,35 @@ interface WhatsAppWebhookBody {
     }>;
 }
 
-// --- System Instructions ---
+// --- System Instruction for Ian the Carpenter ---
 
-const SYSTEM_INSTRUCTION = `אתה איאן (או הנגר הראשי מנגריית הבוטיק "נגריית איאן").
-אתה איש מקצוע אמיתי, חם, ענייני, ישיר ומדבר בגובה העיניים כבן אדם — לא כמו נציג שירות רובוטי.
+const SYSTEM_INSTRUCTION = `אתה איאן (הנגר הראשי מנגריית הבוטיק "נגריית איאן").
+אתה נגר מקצועי, יסודי, אדיב, ענייני ומדבר ישירות כבן אדם — לא כמו צ'אטבוט או איש מכירות רובוטי.
 
-חוקי זהב (קריטי):
-1. שאלה אחת בלבד בכל הודעה: לעולם אל תשאל שתי שאלות או רשימת שאלות. שאל רק דבר אחד ממוקד בכל פעם (למשל: רק על המידות, או רק על סוג העץ).
-2. בלי חפירות שיווקיות: לעולם אל תחזור על הביטוי "אצלנו בנגריית איאן", "אנחנו בנגריית איאן" או סיסמאות שיווקיות. דבר כנגר: "אני יכול לעשות את זה", "אנחנו עובדים עם...", "בכיף".
-3. תגובות קצרות ואנושיות: 1 עד 2 משפטים קצרים בלבד! קצר, מדויק וקולע למובייל.
-4. זיכרון והקשבה: קרא היטב את היסטוריית השיחה. אל תשאל שוב על דברים שהלקוח כבר ציין (כמו צבע, חומר, מידות או סוג הפרויקט).
-5. מחירים: אל תמציא מחיר מראש. תגיד: "המחיר תלוי במידות ובפרזול. כדי לתת הצעה מדויקת וללא התחייבות, מה הטלפון שלך ובאיזה אזור אתה בארץ?"
+חוקי זהב קריטיים:
+1. שאלה אחת בלבד בכל הודעה: לעולם אל תשאל שתי שאלות או רשימת שאלות. התמקד רק בפרט אחד בכל פעם (למשל: סוג הדלתות, מידות, או אזור מגורים).
+2. בלי סיסמאות שיווקיות: לעולם אל תגיד "אצלנו בנגריית איאן", "אנחנו שואפים ל..." או פראזות מוגזמות. דבר ישיר: "אני יכול לבצע את זה", "עובדים בעיקר עם סנדוויץ' בירץ' ופורמייקה", "בכיף".
+3. תגובות קצרות ונוחות לוואטסאפ: 1 עד 2 משפטים קצרים וממוקדים בלבד!
+4. זיכרון והקשבה: קרא את כל היסטוריית השיחה. אל תשאל שוב על דברים שהלקוח כבר אמר.
+5. תמונות והודעות קוליות: אם הלקוח שלח תמונה של רהיט או השראה, התייחס לסגנון שבתמונה. אם שלח הודעה קולית, ענה ישירות למה שביקש בקולו.
+6. מחירים והתקדמות: אל תמציא מחיר מדויק מראש. אמור: "העלות תלויה במידות ובפרזול. כדי שאתן הצעה מדויקת וללא התחייבות, מה המידות בערך ובאיזה אזור בארץ מדובר?"`;
 
-זרימת שיחה טבעית:
-- הלקוח פונה ⬅️ אתה מברר סוג עבודה וסגנון (בשאלה אחת קצרה).
-- הלקוח עונה ⬅️ מברר מידות כלליות או חומר.
-- ברגע שיש כיוון ⬅️ מציע פגישת ייעוץ ומדידה ללא עלות ומבקש טלפון ואזור.`;
+// --- HMAC Signature Verification (SKILL.md 2.B) ---
 
-// --- Supabase DB Handlers ---
+function verifyMetaSignature(rawBody: string | Buffer, signatureHeader: string | undefined, appSecret: string): boolean {
+    if (!signatureHeader || !signatureHeader.startsWith('sha256=')) return false;
+    const signature = signatureHeader.substring(7);
+    const hmac = crypto.createHmac('sha256', appSecret);
+    hmac.update(rawBody);
+    const digest = hmac.digest('hex');
+    try {
+        return crypto.timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(digest, 'hex'));
+    } catch {
+        return false;
+    }
+}
+
+// --- Supabase DB Handlers (Permanent Memory & Leads) ---
 
 async function loadHistory(phone: string): Promise<ChatMessage[]> {
     try {
@@ -90,14 +113,8 @@ async function loadHistory(phone: string): Promise<ChatMessage[]> {
             }));
         }
     } catch (err) {
-        console.error('[Supabase] Load error, falling back to KV:', err);
+        console.error('[Supabase] loadHistory error:', err);
     }
-
-    // Fallback to KV
-    try {
-        const raw = await kv.get<any>(`wa_history_${phone}`);
-        if (Array.isArray(raw)) return raw;
-    } catch {}
     return [];
 }
 
@@ -107,7 +124,7 @@ async function saveMessage(phone: string, role: 'user' | 'model', text: string):
             .from('carpentry_messages')
             .insert({ phone, role, content: text });
     } catch (err) {
-        console.error('[Supabase] Insert message error:', err);
+        console.error('[Supabase] saveMessage error:', err);
     }
 }
 
@@ -123,78 +140,39 @@ async function upsertLead(phone: string, customerName: string, notes?: string): 
                 updated_at: new Date().toISOString()
             }, { onConflict: 'phone' });
     } catch (err) {
-        console.error('[Supabase] Upsert lead error:', err);
+        console.error('[Supabase] upsertLead error:', err);
     }
 }
 
-// --- Gemini AI ---
+// --- WhatsApp Media Downloader (SKILL.md Section 5) ---
 
-function buildValidContents(history: ChatMessage[], newUserMessage: string) {
-    const raw = [...history, { role: 'user' as const, text: newUserMessage }].filter(
-        (m) => m && m.text && m.text.trim()
-    );
-    const normalized: Array<{ role: 'user' | 'model'; parts: [{ text: string }] }> = [];
-
-    for (const msg of raw) {
-        const text = msg.text.trim();
-        if (!text) continue;
-
-        if (normalized.length === 0) {
-            if (msg.role === 'user') {
-                normalized.push({ role: 'user', parts: [{ text }] });
-            }
-        } else {
-            const last = normalized[normalized.length - 1];
-            if (last.role === msg.role) {
-                last.parts[0].text += '\n' + text;
-            } else {
-                normalized.push({ role: msg.role, parts: [{ text }] });
-            }
-        }
-    }
-
-    if (normalized.length === 0) {
-        normalized.push({ role: 'user', parts: [{ text: newUserMessage.trim() || 'שלום' }] });
-    }
-    return normalized;
-}
-
-async function callGemini(history: ChatMessage[], userMessage: string): Promise<string> {
-    const contents = buildValidContents(history, userMessage);
+async function downloadWhatsAppMedia(mediaId: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
     try {
-        const response = await aiClient.models.generateContent({
-            model: GEMINI_MODEL,
-            contents,
-            config: {
-                temperature: 0.3,
-                topP: 0.85,
-                maxOutputTokens: 250,
-                systemInstruction: SYSTEM_INSTRUCTION,
-            },
+        const metaRes = await fetch(`${WA_API_BASE}/${mediaId}`, {
+            headers: { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}` },
         });
-        const text = response.text;
-        if (!text || text.trim().length === 0) {
-            return 'סליחה, לא הצלחתי לעבד את הבקשה. אפשר לנסות שוב?';
-        }
-        return text.trim();
-    } catch (error: any) {
-        console.error('[Gemini] Error:', error?.message || error);
-        return 'אירעה שגיאה זמנית. אפשר לנסות שוב בבקשה?';
+        const metaData = await metaRes.json();
+        if (!metaData.url) return null;
+
+        const binaryRes = await fetch(metaData.url, {
+            headers: { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}` },
+        });
+        const arrayBuffer = await binaryRes.arrayBuffer();
+        return {
+            buffer: Buffer.from(arrayBuffer),
+            mimeType: metaData.mime_type || 'image/jpeg',
+        };
+    } catch (err) {
+        console.error('[WhatsApp Media] Download error:', err);
+        return null;
     }
 }
 
-// --- WhatsApp Cloud API Helpers ---
+// --- Outbound WhatsApp Message Senders (SKILL.md Section 4) ---
 
-async function sendWhatsAppMessageWithId(phoneId: string, to: string, text: string): Promise<void> {
-    if (!WHATSAPP_ACCESS_TOKEN) {
-        console.error('[WhatsApp] CRITICAL: Missing WHATSAPP_ACCESS_TOKEN in environment variables!');
-        return;
-    }
-
+async function sendTextMessage(phoneId: string, to: string, text: string): Promise<void> {
     try {
-        const url = `${WA_API_BASE}/${phoneId}/messages`;
-        console.log(`[WhatsApp] Sending reply to ${to} using Phone ID ${phoneId}...`);
-        const res = await fetch(url, {
+        const res = await fetch(`${WA_API_BASE}/${phoneId}/messages`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -212,17 +190,15 @@ async function sendWhatsAppMessageWithId(phoneId: string, to: string, text: stri
         const resData = await res.text();
         if (!res.ok) {
             console.error(`[WhatsApp] sendMessage failed (${res.status}):`, resData);
-        } else {
-            console.log(`[WhatsApp] sendMessage SUCCESS (${res.status}):`, resData);
         }
-    } catch (error) {
-        console.error('[WhatsApp] sendMessage exception:', error);
+    } catch (err) {
+        console.error('[WhatsApp] sendMessage exception:', err);
     }
 }
 
-async function markMessageAsRead(messageId: string): Promise<void> {
+async function markMessageAsRead(phoneId: string, messageId: string): Promise<void> {
     try {
-        await fetch(`${WA_API_BASE}/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+        await fetch(`${WA_API_BASE}/${phoneId}/messages`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -239,26 +215,90 @@ async function markMessageAsRead(messageId: string): Promise<void> {
     }
 }
 
-// --- Lead Report (sends to Telegram admin group) ---
+// --- Gemini AI Multi-turn & Multimodal Engine ---
+
+function buildValidContents(history: ChatMessage[], newUserText: string, mediaAttachment?: { buffer: Buffer; mimeType: string }) {
+    const normalized: Array<{ role: 'user' | 'model'; parts: any[] }> = [];
+
+    for (const msg of history) {
+        const text = msg.text?.trim();
+        if (!text) continue;
+
+        if (normalized.length === 0) {
+            if (msg.role === 'user') {
+                normalized.push({ role: 'user', parts: [{ text }] });
+            }
+        } else {
+            const last = normalized[normalized.length - 1];
+            if (last.role === msg.role) {
+                last.parts[0].text += '\n' + text;
+            } else {
+                normalized.push({ role: msg.role, parts: [{ text }] });
+            }
+        }
+    }
+
+    const userParts: any[] = [];
+    if (mediaAttachment) {
+        userParts.push({
+            inlineData: {
+                data: mediaAttachment.buffer.toString('base64'),
+                mimeType: mediaAttachment.mimeType
+            }
+        });
+    }
+    userParts.push({ text: newUserText || 'שלום' });
+
+    normalized.push({ role: 'user', parts: userParts });
+    return normalized;
+}
+
+async function generateIanResponse(
+    history: ChatMessage[],
+    userText: string,
+    mediaAttachment?: { buffer: Buffer; mimeType: string }
+): Promise<string> {
+    try {
+        const contents = buildValidContents(history, userText, mediaAttachment);
+        const response = await aiClient.models.generateContent({
+            model: GEMINI_MODEL,
+            contents,
+            config: {
+                temperature: 0.3,
+                topP: 0.85,
+                maxOutputTokens: 250,
+                systemInstruction: SYSTEM_INSTRUCTION,
+            },
+        });
+        return response.text?.trim() || 'שלום! איזה רהיט תרצה שנתכנן עבורך?';
+    } catch (err: any) {
+        console.error('[Gemini] Generation error:', err?.message || err);
+        return 'בכיף, אשמח לעזור לך. ספר לי איזה רהיט אתה מעוניין לבנות ומה המידות בערך?';
+    }
+}
+
+// --- Lead Reporting (Instant Telegram Alert) ---
 
 async function sendLeadReport(phone: string, customerName: string): Promise<void> {
     if (!ADMIN_GROUP_ID || !TELEGRAM_BOT_TOKEN) return;
 
     try {
         const history = await loadHistory(phone);
-        let report = `🪚 *ליד חדש מוואטסאפ — נגריית איאן*\n\n`;
+        let report = `🪵 *ליד חדש מוואטסאפ — נגריית איאן*\n\n`;
         report += `👤 *שם:* ${customerName}\n`;
-        report += `📞 *טלפון:* \`${phone}\` 🎯\n`;
-        report += `\n💬 *תמליל:*\n`;
-        history.slice(-10).forEach((msg, i) => {
-            const label = msg.role === 'user' ? 'לקוח' : 'נגר';
-            const t = msg.text.length > 150 ? msg.text.substring(0, 150) + '...' : msg.text;
+        report += `📞 *טלפון:* [${phone}](https://wa.me/${phone}) 🎯\n`;
+        report += `\n💬 *תמליל השיחה האחרונה:*\n`;
+
+        history.slice(-8).forEach((msg, i) => {
+            const label = msg.role === 'user' ? '👤 לקוח' : '🪚 איאן';
+            const clean = msg.text.replace(/[*_`]/g, '');
+            const t = clean.length > 120 ? clean.substring(0, 120) + '...' : clean;
             report += `${i + 1}. ${label}: ${t}\n`;
         });
+
         report += `\n🕐 ${new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}`;
 
-        const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-        await fetch(url, {
+        await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -267,41 +307,16 @@ async function sendLeadReport(phone: string, customerName: string): Promise<void
                 parse_mode: 'Markdown',
             }),
         });
-        console.log(`[Lead] WhatsApp lead report sent for ${phone}`);
-    } catch (error) {
-        console.error('[Lead] Error sending report:', error);
+    } catch (err) {
+        console.error('[Telegram Lead Alert] Error:', err);
     }
 }
 
-// --- Deduplication (prevent processing the same message twice) ---
+// --- Webhook Controller ---
 
-const PROCESSED_KEY_PREFIX = 'wa_msg_';
+export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
 
-async function isMessageProcessed(messageId: string): Promise<boolean> {
-    try {
-        const exists = await kv.get(`${PROCESSED_KEY_PREFIX}${messageId}`);
-        return !!exists;
-    } catch {
-        return false;
-    }
-}
-
-async function markMessageProcessed(messageId: string): Promise<void> {
-    try {
-        await kv.set(`${PROCESSED_KEY_PREFIX}${messageId}`, '1', { ex: 3600 }); // 1 hour TTL
-    } catch {
-        // Non-critical
-    }
-}
-
-// --- Main Handler ---
-
-export default async function handler(
-    req: VercelRequest,
-    res: VercelResponse
-): Promise<void> {
-
-    // --- GET: Webhook Verification ---
+    // 1. Webhook Verification (GET /webhook - SKILL.md Section 2.A)
     if (req.method === 'GET') {
         const mode = req.query['hub.mode'] as string;
         const token = req.query['hub.verify_token'] as string;
@@ -311,13 +326,13 @@ export default async function handler(
             console.log('[WhatsApp] Webhook verified successfully');
             res.status(200).send(challenge);
         } else {
-            console.error('[WhatsApp] Webhook verification failed');
-            res.status(403).send('Forbidden');
+            console.error('[WhatsApp] Verification token mismatch');
+            res.status(403).json({ error: 'Verification token mismatch' });
         }
         return;
     }
 
-    // --- POST: Incoming Messages ---
+    // 2. Only allow POST for inbound events
     if (req.method !== 'POST') {
         res.status(405).json({ error: 'Method Not Allowed' });
         return;
@@ -330,6 +345,7 @@ export default async function handler(
             res.status(200).json({ status: 'ignored' });
             return;
         }
+
         if (!body.entry || body.entry.length === 0) {
             res.status(200).json({ status: 'no_entry' });
             return;
@@ -338,67 +354,95 @@ export default async function handler(
         for (const entry of body.entry) {
             for (const change of entry.changes) {
                 const value = change.value;
-
-                // Dynamically fallback to phone_number_id from incoming message metadata
                 const incomingPhoneId = value.metadata?.phone_number_id;
                 const effectivePhoneId = WHATSAPP_PHONE_NUMBER_ID || incomingPhoneId || '';
 
-                // Skip status updates (delivered, read, etc.)
+                // Ignore status callbacks (sent, delivered, read) to prevent self loops (SKILL.md 2.C)
                 if (!value.messages || value.messages.length === 0) continue;
 
                 for (const message of value.messages) {
-                    // Only handle text messages
-                    if (message.type !== 'text' || !message.text?.body) continue;
+                    const messageId = message.id;
 
                     // Deduplication check
-                    if (await isMessageProcessed(message.id)) {
-                        console.log(`[WhatsApp] Skipping duplicate message: ${message.id}`);
+                    if (processedMessages.has(messageId)) {
+                        console.log(`[WhatsApp] Skipping duplicate wamid: ${messageId}`);
                         continue;
                     }
-                    await markMessageProcessed(message.id);
+                    processedMessages.add(messageId);
+                    if (processedMessages.size > 1000) {
+                        const firstKey = processedMessages.values().next().value;
+                        if (firstKey) processedMessages.delete(firstKey);
+                    }
 
                     const customerPhone = message.from;
                     const customerName = value.contacts?.[0]?.profile?.name || 'לקוח';
-                    const userText = message.text.body.trim();
 
-                    console.log(`[WhatsApp] Processing message from ${customerName} (${customerPhone}): "${userText}"`);
+                    // Parse inbound message types (Text, Interactive buttons, Voice notes, Images, Location)
+                    let userText = '';
+                    let mediaAttachment: { buffer: Buffer; mimeType: string } | undefined;
 
-                    // Mark as read (shows blue checkmarks)
-                    markMessageAsRead(message.id).catch(() => {});
+                    if (message.type === 'text' && message.text?.body) {
+                        userText = message.text.body.trim();
+                    } else if (message.type === 'interactive') {
+                        userText = message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || '';
+                    } else if (message.type === 'audio' && message.audio?.id) {
+                        // Voice Note Processing (SKILL.md Section 5 & 6.4)
+                        const audioData = await downloadWhatsAppMedia(message.audio.id);
+                        if (audioData) {
+                            mediaAttachment = audioData;
+                            userText = '[הודעה קולית מהלקוח]';
+                        }
+                    } else if (message.type === 'image' && message.image?.id) {
+                        // Image Inspiration Processing (SKILL.md Section 5)
+                        const imgData = await downloadWhatsAppMedia(message.image.id);
+                        if (imgData) {
+                            mediaAttachment = imgData;
+                            userText = message.image.caption ? `[תמונה מצורפת]: ${message.image.caption}` : '[הלקוח צירף תמונה / השראה של רהיט]';
+                        }
+                    } else if (message.type === 'location' && message.location) {
+                        const loc = message.location;
+                        userText = `[מיקום הלקוח למדידה/הובלה]: ${loc.name || loc.address || `Lat: ${loc.latitude}, Long: ${loc.longitude}`}`;
+                    }
 
-                    // Load conversation history
+                    if (!userText && !mediaAttachment) continue;
+
+                    console.log(`[WhatsApp Inbound] From ${customerName} (${customerPhone}): "${userText}"`);
+
+                    // Mark as read immediately (shows blue checkmarks - SKILL.md 4.E)
+                    markMessageAsRead(effectivePhoneId, messageId).catch(() => {});
+
+                    // Load past conversation history from Supabase
                     const history = await loadHistory(customerPhone);
 
-                    // Call Gemini AI
-                    console.log(`[WhatsApp] Calling Gemini for ${customerPhone}...`);
-                    const aiResponse = await callGemini(history, userText);
-                    console.log(`[WhatsApp] Gemini reply: "${aiResponse}"`);
+                    // Call Gemini AI agent
+                    const aiResponse = await generateIanResponse(history, userText, mediaAttachment);
+                    console.log(`[WhatsApp Reply] To ${customerPhone}: "${aiResponse}"`);
 
-                    // Save messages to Supabase permanently
+                    // Save messages to Supabase and upsert lead record
                     await Promise.all([
                         saveMessage(customerPhone, 'user', userText),
                         saveMessage(customerPhone, 'model', aiResponse),
                         upsertLead(customerPhone, customerName, userText)
                     ]);
 
-                    // Send AI response back via WhatsApp
-                    const targetPhoneId = effectivePhoneId;
-                    if (!targetPhoneId) {
-                        console.error('[WhatsApp] No phone number ID available to send message!');
+                    // Send outbound WhatsApp reply
+                    if (effectivePhoneId) {
+                        await sendTextMessage(effectivePhoneId, customerPhone, aiResponse);
                     } else {
-                        await sendWhatsAppMessageWithId(targetPhoneId, customerPhone, aiResponse);
+                        console.error('[WhatsApp] Missing phone number ID for outbound reply');
                     }
 
-                    // Send lead report to Telegram
-                    if (history.length >= 2) {
+                    // Send lead notification to Telegram admin group
+                    if (history.length >= 2 || userText.length > 20) {
                         sendLeadReport(customerPhone, customerName).catch(console.error);
                     }
                 }
             }
         }
+
         res.status(200).json({ status: 'ok' });
-    } catch (error) {
-        console.error('[WhatsApp Webhook] Unhandled error:', error);
+    } catch (err) {
+        console.error('[WhatsApp Webhook Error]:', err);
         res.status(500).json({ error: 'Internal Server Error' });
     }
 }
