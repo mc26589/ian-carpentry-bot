@@ -207,20 +207,42 @@ async function saveHistory(chatId: number, history: ChatMessage[]): Promise<void
 
 // --- Gemini AI ---
 
+function buildValidContents(history: ChatMessage[], newUserMessage: string) {
+    const raw = [...history, { role: 'user' as const, text: newUserMessage }].filter(
+        (m) => m && m.text && m.text.trim()
+    );
+    const normalized: Array<{ role: 'user' | 'model'; parts: [{ text: string }] }> = [];
+
+    for (const msg of raw) {
+        const text = msg.text.trim();
+        if (!text) continue;
+
+        if (normalized.length === 0) {
+            if (msg.role === 'user') {
+                normalized.push({ role: 'user', parts: [{ text }] });
+            }
+        } else {
+            const last = normalized[normalized.length - 1];
+            if (last.role === msg.role) {
+                last.parts[0].text += '\n' + text;
+            } else {
+                normalized.push({ role: msg.role, parts: [{ text }] });
+            }
+        }
+    }
+
+    // Ensure at least the new user message is present
+    if (normalized.length === 0) {
+        normalized.push({ role: 'user', parts: [{ text: newUserMessage.trim() || 'שלום' }] });
+    }
+
+    return normalized;
+}
+
 async function callGemini(history: ChatMessage[], userMessage: string): Promise<string> {
     const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-    // Build contents array from history + new user message
-    const contents = [
-        ...history.map((msg) => ({
-            role: msg.role,
-            parts: [{ text: msg.text }],
-        })),
-        {
-            role: 'user' as const,
-            parts: [{ text: userMessage }],
-        },
-    ];
+    const contents = buildValidContents(history, userMessage);
 
     try {
         const response = await ai.models.generateContent({
@@ -230,9 +252,6 @@ async function callGemini(history: ChatMessage[], userMessage: string): Promise<
                 temperature: 0.35,
                 topP: 0.85,
                 maxOutputTokens: 300,
-                thinkingConfig: {
-                    thinkingBudget: 0,
-                },
                 systemInstruction: SYSTEM_INSTRUCTION,
             },
         });
