@@ -10,7 +10,7 @@ const ADMIN_GROUP_ID = parseInt(process.env.ADMIN_GROUP_ID || '0', 10);
 // --- Constants ---
 const GEMINI_MODEL = 'gemini-3.5-flash-lite';
 const MAX_HISTORY_MESSAGES = 20;
-const HISTORY_TTL_SECONDS = 900; // 15 minutes
+const HISTORY_TTL_SECONDS = 86400; // 24 hours — so customers can resume conversations
 const TG_MAX_LENGTH = 4096;
 const ACTIVE_USERS_KEY = 'active_bot_users';
 
@@ -87,7 +87,6 @@ async function endUserSession(userId: number, chatId?: number, firstName?: strin
         let session = await kv.get<UserSession>(sessionKey(userId));
         let messages = session?.messages_history || [];
 
-        // Fallback: if session in KV is empty, pull from conversation history
         if (messages.length === 0 && chatId) {
             const hist = await loadHistory(chatId);
             messages = hist.map(h => `${h.role === 'user' ? 'לקוח' : 'נגר'}: ${h.text}`);
@@ -119,11 +118,9 @@ async function endUserSession(userId: number, chatId?: number, firstName?: strin
 
         report += `\n🕐 *זמן:* ${new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}`;
 
-        // Send report to admin group
         await sendTelegramMessage(ADMIN_GROUP_ID, report);
         console.log(`[Session] Lead report sent to admin group for user ${userId}`);
 
-        // Clear session from KV
         await kv.del(sessionKey(userId));
         await kv.srem(ACTIVE_USERS_KEY, userId.toString());
     } catch (error) {
@@ -149,7 +146,6 @@ async function handleUserMessage(userId: number, firstName: string, username: st
             await kv.sadd(ACTIVE_USERS_KEY, userId.toString());
         }
 
-        // Append message
         session.messages_history.push(messageText);
         session.first_name = firstName;
         session.username = username;
@@ -157,62 +153,68 @@ async function handleUserMessage(userId: number, firstName: string, username: st
 
         await kv.set(sessionKey(userId), session);
 
-        // Auto-detect phone number: if customer just provided a phone number, send lead report immediately!
-        const hasPhone = /(?:05\d[-\s]?\d{7}|0[23489][-\s]?\d{7}|\+972[-\s]?\d{1,2}[-\s]?\d{7}|\b\d{9,10}\b)/.test(messageText);
+        // Auto-detect phone number: send lead report immediately but DON'T delete history
+        const hasPhone = /(?:05\d[-\s]?\d{7}|0[23489][-\s]?\d{7}|\+972[-\s]?\d{1,2}[-\s]?\d{7})/.test(messageText);
         if (hasPhone) {
             console.log(`[Lead] Phone detected from user ${userId}, dispatching real-time lead report`);
-            // Run report delivery in background without blocking response
-            setTimeout(() => {
-                endUserSession(userId, chatId, firstName, username).catch(console.error);
-            }, 1000);
+            sendLeadReport(userId, chatId, firstName, username).catch(console.error);
         }
     } catch (error) {
         console.error('[KV] Error updating session:', error);
     }
 }
 
-// --- Conversation History (Dual Memory: In-Memory Cache + Vercel KV) ---
+/**
+ * Send lead report WITHOUT deleting conversation history
+ */
+async function sendLeadReport(userId: number, chatId: number, firstName: string, username?: string): Promise<void> {
+    try {
+        const session = await kv.get<UserSession>(sessionKey(userId));
+        const history = await loadHistory(chatId);
+        const messages = session?.messages_history || history.map(h => `${h.role === 'user' ? 'לקוח' : 'נגר'}: ${h.text}`);
+        const detectedPhone = extractPhoneFromMessages(messages);
+        const userLabel = (session?.username || username) ? `@${session?.username || username}` : (firstName || 'לקוח');
 
-const memoryCache = new Map<number, { history: ChatMessage[]; updatedAt: number }>();
+        let report = `🪚 *ליד חדש — נגריית איאן*\n\n`;
+        report += `👤 *שם:* ${session?.first_name || firstName || 'לא צוין'}\n`;
+        report += `📱 *יוזר:* ${userLabel}\n`;
+        if (detectedPhone) report += `📞 *טלפון:* \`${detectedPhone}\` 🎯\n`;
+        report += `\n💬 *תמליל:*\n`;
+        messages.slice(-10).forEach((msg, i) => {
+            const t = msg.length > 150 ? msg.substring(0, 150) + '...' : msg;
+            report += `${i + 1}. ${t}\n`;
+        });
+        report += `\n🕐 ${new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}`;
+
+        await sendTelegramMessage(ADMIN_GROUP_ID, report);
+        console.log(`[Lead] Report sent for user ${userId}`);
+    } catch (error) {
+        console.error('[Lead] Error sending report:', error);
+    }
+}
+
+// --- Conversation History (Vercel KV Only — stateless-safe) ---
 
 function kvKey(chatId: number): string {
     return `ian_history_${chatId}`;
 }
 
 async function loadHistory(chatId: number): Promise<ChatMessage[]> {
-    // 1. Try in-memory cache first
-    const cached = memoryCache.get(chatId);
-    if (cached && (Date.now() - cached.updatedAt) < (HISTORY_TTL_SECONDS * 1000)) {
-        return cached.history;
-    }
-
-    // 2. Try Vercel KV
     try {
         const raw = await kv.get<any>(kvKey(chatId));
-        let history: ChatMessage[] = [];
-
+        if (Array.isArray(raw)) return raw;
         if (typeof raw === 'string') {
-            try { history = JSON.parse(raw); } catch { history = []; }
-        } else if (Array.isArray(raw)) {
-            history = raw;
+            try { return JSON.parse(raw); } catch { return []; }
         }
-
-        if (history.length > 0) {
-            memoryCache.set(chatId, { history, updatedAt: Date.now() });
-        }
-        return history;
+        return [];
     } catch (error) {
         console.error('[KV] Load history error:', error);
-        return cached ? cached.history : [];
+        return [];
     }
 }
 
 async function saveHistory(chatId: number, history: ChatMessage[]): Promise<void> {
     const trimmed = history.slice(-MAX_HISTORY_MESSAGES);
-    // Update in-memory cache immediately
-    memoryCache.set(chatId, { history: trimmed, updatedAt: Date.now() });
-
-    // Update Vercel KV
     try {
         await kv.set(kvKey(chatId), trimmed, { ex: HISTORY_TTL_SECONDS });
     } catch (error) {
@@ -283,7 +285,6 @@ async function callGemini(history: ChatMessage[], userMessage: string): Promise<
 // --- Telegram API Helpers ---
 
 async function sendTelegramMessage(chatId: number, text: string): Promise<void> {
-    // Split long messages if needed
     const chunks: string[] = [];
     let remaining = text;
 
@@ -292,7 +293,6 @@ async function sendTelegramMessage(chatId: number, text: string): Promise<void> 
             chunks.push(remaining);
             break;
         }
-        // Try to break at newline
         let breakPoint = remaining.lastIndexOf('\n', TG_MAX_LENGTH);
         if (breakPoint < TG_MAX_LENGTH * 0.5) {
             breakPoint = TG_MAX_LENGTH;
@@ -318,7 +318,6 @@ async function sendTelegramMessage(chatId: number, text: string): Promise<void> 
                 const errBody = await res.text();
                 console.error(`[Telegram] sendMessage failed (${res.status}):`, errBody);
 
-                // Retry without Markdown if parse_mode caused an error
                 if (res.status === 400 && errBody.includes("can't parse")) {
                     await fetch(url, {
                         method: 'POST',
@@ -360,13 +359,11 @@ export default async function handler(
     req: VercelRequest,
     res: VercelResponse
 ): Promise<void> {
-    // Only accept POST requests
     if (req.method !== 'POST') {
         res.status(405).json({ error: 'Method Not Allowed' });
         return;
     }
 
-    // Validate required env vars
     if (!TELEGRAM_BOT_TOKEN || !GEMINI_API_KEY) {
         console.error('[Config] Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY');
         res.status(500).json({ error: 'Server misconfigured' });
@@ -376,10 +373,8 @@ export default async function handler(
     try {
         const update: TelegramUpdate = req.body;
 
-        // Extract message data
         const message = update.message;
         if (!message || !message.text) {
-            // Not a text message (sticker, photo, etc.) — acknowledge
             res.status(200).json({ ok: true });
             return;
         }
@@ -393,10 +388,8 @@ export default async function handler(
 
         console.log(`[Telegram] Message from ${firstName} (${chatId}): ${userText}`);
 
-        // --- Inactivity Session Management (Private Chats Only) ---
         const isPrivateChat = chatType === 'private';
 
-        // Handle /end command to manually trigger handover
         if (isPrivateChat && (userText === '/end' || userText === '/סיום')) {
             await endUserSession(userId, chatId, firstName, username);
             await sendTelegramMessage(chatId, '🙏 תודה על הפנייה! צוות נגריית איאן יחזור אליך בהקדם.');
@@ -404,12 +397,10 @@ export default async function handler(
             return;
         }
 
-        // Update user session for private chats
         if (isPrivateChat) {
             await handleUserMessage(userId, firstName, username, userText, chatId);
         }
 
-        // --- Handle /start command ---
         if (userText === '/start') {
             const welcomeMsg = `🪚 שלום ${firstName}! 👋\nברוכים הבאים לנגריית איאן — נגריית בוטיק לעבודות עץ בהתאמה אישית.\n\nמטבחים, ארונות, חיפויי קיר, מזנונים ועוד — הכל בעיצוב אישי ובחומרים מעולים.\n\nספרו לי, מה אתם מחפשים? 🪵`;
             await sendTelegramMessage(chatId, welcomeMsg);
@@ -417,7 +408,6 @@ export default async function handler(
             return;
         }
 
-        // --- Handle /help command ---
         if (userText === '/help' || userText === '/עזרה') {
             const helpMsg = `🪚 *נגריית איאן — פקודות*\n\n/start — התחלה מחדש\n/help — תפריט עזרה\n/clear — ניקוי היסטוריית שיחה\n/end — סיום שיחה ושליחה לצוות\n\nאפשר גם פשוט לכתוב מה אתם צריכים! 🪵`;
             await sendTelegramMessage(chatId, helpMsg);
@@ -425,7 +415,6 @@ export default async function handler(
             return;
         }
 
-        // --- Handle /clear command ---
         if (userText === '/clear' || userText === '/ניקוי') {
             await saveHistory(chatId, []);
             await sendTelegramMessage(chatId, '🧹 ההיסטוריה נמחקה. אפשר להתחיל מחדש!');
@@ -434,30 +423,20 @@ export default async function handler(
         }
 
         // --- Main AI flow ---
-
-        // Show typing indicator
         await sendTelegramTypingAction(chatId);
 
-        // Load conversation history from KV
         const history = await loadHistory(chatId);
-
-        // Call Gemini with history + new message
         const aiResponse = await callGemini(history, userText);
 
-        // Update history with both messages
         history.push({ role: 'user', text: userText });
         history.push({ role: 'model', text: aiResponse });
-
-        // Save updated history to KV (resets TTL)
         await saveHistory(chatId, history);
 
-        // Send AI response back to Telegram
         await sendTelegramMessage(chatId, aiResponse);
 
         res.status(200).json({ ok: true });
     } catch (error) {
         console.error('[Webhook] Unhandled error:', error);
-        // Always return 200 to prevent Telegram from retrying
         res.status(200).json({ ok: true, error: 'Internal error handled' });
     }
 }
