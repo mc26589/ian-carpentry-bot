@@ -205,7 +205,8 @@ async function saveHistory(chatId: number, history: ChatMessage[]): Promise<void
     }
 }
 
-// --- Gemini AI ---
+// --- Global AI Client (instantiated once for zero latency overhead) ---
+const aiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 function buildValidContents(history: ChatMessage[], newUserMessage: string) {
     const raw = [...history, { role: 'user' as const, text: newUserMessage }].filter(
@@ -231,7 +232,6 @@ function buildValidContents(history: ChatMessage[], newUserMessage: string) {
         }
     }
 
-    // Ensure at least the new user message is present
     if (normalized.length === 0) {
         normalized.push({ role: 'user', parts: [{ text: newUserMessage.trim() || 'שלום' }] });
     }
@@ -240,18 +240,16 @@ function buildValidContents(history: ChatMessage[], newUserMessage: string) {
 }
 
 async function callGemini(history: ChatMessage[], userMessage: string): Promise<string> {
-    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-
     const contents = buildValidContents(history, userMessage);
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await aiClient.models.generateContent({
             model: GEMINI_MODEL,
             contents,
             config: {
-                temperature: 0.4,
-                topP: 0.9,
-                maxOutputTokens: 1000,
+                temperature: 0.3,
+                topP: 0.85,
+                maxOutputTokens: 250,
                 systemInstruction: SYSTEM_INSTRUCTION,
             },
         });
