@@ -343,6 +343,29 @@ async function sendLeadReport(phone: string, customerName: string): Promise<void
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
 
+    // 0. Debug endpoint - tests Supabase and env vars
+    if (req.method === 'GET' && req.query['debug'] === '1') {
+        const dbTest = await supabase
+            .from('carpentry_messages')
+            .insert({ phone: 'debug_test', role: 'user', content: 'health_check_' + Date.now() })
+            .select();
+
+        res.status(200).json({
+            ok: true,
+            env: {
+                wa_token: WHATSAPP_ACCESS_TOKEN ? WHATSAPP_ACCESS_TOKEN.substring(0, 12) + '...' : 'MISSING',
+                phone_id: WHATSAPP_PHONE_NUMBER_ID,
+                supabase_url: SUPABASE_URL ? SUPABASE_URL.substring(0, 35) + '...' : 'MISSING',
+                supabase_key: SUPABASE_KEY ? SUPABASE_KEY.substring(0, 20) + '...' : 'MISSING',
+                gemini_key: GEMINI_API_KEY ? GEMINI_API_KEY.substring(0, 10) + '...' : 'MISSING',
+                tg_token: TELEGRAM_BOT_TOKEN ? TELEGRAM_BOT_TOKEN.substring(0, 10) + '...' : 'MISSING',
+                admin_group: ADMIN_GROUP_ID,
+            },
+            supabase_insert: dbTest.error ? { error: dbTest.error.message, code: dbTest.error.code } : { ok: true, id: dbTest.data?.[0]?.id },
+        });
+        return;
+    }
+
     // 1. Webhook Verification (GET /webhook - SKILL.md Section 2.A)
     if (req.method === 'GET') {
         const mode = req.query['hub.mode'] as string;
