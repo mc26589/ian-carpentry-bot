@@ -1,35 +1,8 @@
 {
-    "crons": [
-        {
-            "path": "/api/sweep-sessions",
-            "schedule": "*/5 * * * *"
-        }
-    ],
-    "version": 2,
-    "builds": [
-        {
-            "src": "api/telegram-webhook.ts",
-            "use": "@vercel/node",
-            "config": {
-                "tsconfig": "tsconfig.json"
-            }
-        },
-        {
-            "src": "api/sweep-sessions.ts",
-            "use": "@vercel/node",
-            "config": {
-                "tsconfig": "tsconfig.json"
-            }
-        }
-    ],
-    "routes": [
-        {
-            "src": "/api/telegram-webhook",
-            "dest": "/api/telegram-webhook.ts"
-        },
-        {
-            "src": "/api/sweep-sessions",
-            "dest": "/api/sweep-sessions.ts"
-        }
-    ]
+  "crons": [
+    {
+      "path": "/api/sweep-sessions",
+      "schedule": "*/5 * * * *"
+    }
+  ]
 }
