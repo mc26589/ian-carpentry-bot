@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { createClient } from '@supabase/supabase-js';
 import { kv } from '@vercel/kv';
 import { GoogleGenAI } from '@google/genai';
 
@@ -10,11 +11,17 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const ADMIN_GROUP_ID = parseInt(process.env.ADMIN_GROUP_ID || '-5472650764', 10);
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://jmftbcfdcssmxozzaqav.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImptZnRiY2ZkY3NzbXhvenphcWF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE1OTkzMDUsImV4cCI6MjA4NzE3NTMwNX0.nXRcpaAX-L15LZ62_W3fyynAFj6QEsAlma8CHa3Ne4s';
+
 // --- Constants ---
 const GEMINI_MODEL = 'gemini-3.5-flash-lite';
 const MAX_HISTORY_MESSAGES = 20;
-const HISTORY_TTL_SECONDS = 86400; // 24 hours
 const WA_API_BASE = 'https://graph.facebook.com/v21.0';
+
+// --- Clients ---
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const aiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // --- Types ---
 
@@ -48,7 +55,7 @@ interface WhatsAppWebhookBody {
     }>;
 }
 
-// --- System Instructions (same persona as Telegram) ---
+// --- System Instructions ---
 
 const SYSTEM_INSTRUCTION = `אתה איאן (או הנגר הראשי מנגריית הבוטיק "נגריית איאן").
 אתה איש מקצוע אמיתי, חם, ענייני, ישיר ומדבר בגובה העיניים כבן אדם — לא כמו נציג שירות רובוטי.
@@ -65,35 +72,58 @@ const SYSTEM_INSTRUCTION = `אתה איאן (או הנגר הראשי מנגרי
 - הלקוח עונה ⬅️ מברר מידות כלליות או חומר.
 - ברגע שיש כיוון ⬅️ מציע פגישת ייעוץ ומדידה ללא עלות ומבקש טלפון ואזור.`;
 
-// --- Global AI Client ---
-const aiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-
-// --- Conversation History (Vercel KV) ---
-
-function kvKey(phone: string): string {
-    return `wa_history_${phone}`;
-}
+// --- Supabase DB Handlers ---
 
 async function loadHistory(phone: string): Promise<ChatMessage[]> {
     try {
-        const raw = await kv.get<any>(kvKey(phone));
-        if (Array.isArray(raw)) return raw;
-        if (typeof raw === 'string') {
-            try { return JSON.parse(raw); } catch { return []; }
+        const { data, error } = await supabase
+            .from('carpentry_messages')
+            .select('role, content')
+            .eq('phone', phone)
+            .order('created_at', { ascending: true })
+            .limit(MAX_HISTORY_MESSAGES);
+
+        if (!error && data && data.length > 0) {
+            return data.map(m => ({
+                role: m.role as 'user' | 'model',
+                text: m.content
+            }));
         }
-        return [];
-    } catch (error) {
-        console.error('[KV] Load history error:', error);
-        return [];
+    } catch (err) {
+        console.error('[Supabase] Load error, falling back to KV:', err);
+    }
+
+    // Fallback to KV
+    try {
+        const raw = await kv.get<any>(`wa_history_${phone}`);
+        if (Array.isArray(raw)) return raw;
+    } catch {}
+    return [];
+}
+
+async function saveMessage(phone: string, role: 'user' | 'model', text: string): Promise<void> {
+    try {
+        await supabase
+            .from('carpentry_messages')
+            .insert({ phone, role, content: text });
+    } catch (err) {
+        console.error('[Supabase] Insert message error:', err);
     }
 }
 
-async function saveHistory(phone: string, history: ChatMessage[]): Promise<void> {
-    const trimmed = history.slice(-MAX_HISTORY_MESSAGES);
+async function upsertLead(phone: string, customerName: string, notes?: string): Promise<void> {
     try {
-        await kv.set(kvKey(phone), trimmed, { ex: HISTORY_TTL_SECONDS });
-    } catch (error) {
-        console.error('[KV] Save history error:', error);
+        await supabase
+            .from('carpentry_leads')
+            .upsert({
+                phone,
+                customer_name: customerName,
+                platform: 'whatsapp',
+                notes,
+                updated_at: new Date().toISOString()
+            }, { onConflict: 'phone' });
+    } catch (err) {
+        console.error('[Supabase] Upsert lead error:', err);
     }
 }
 
@@ -344,10 +374,12 @@ export default async function handler(
                     const aiResponse = await callGemini(history, userText);
                     console.log(`[WhatsApp] Gemini reply: "${aiResponse}"`);
 
-                    // Save updated history
-                    history.push({ role: 'user', text: userText });
-                    history.push({ role: 'model', text: aiResponse });
-                    await saveHistory(customerPhone, history);
+                    // Save messages to Supabase permanently
+                    await Promise.all([
+                        saveMessage(customerPhone, 'user', userText),
+                        saveMessage(customerPhone, 'model', aiResponse),
+                        upsertLead(customerPhone, customerName, userText)
+                    ]);
 
                     // Send AI response back via WhatsApp
                     const targetPhoneId = effectivePhoneId;
@@ -357,8 +389,8 @@ export default async function handler(
                         await sendWhatsAppMessageWithId(targetPhoneId, customerPhone, aiResponse);
                     }
 
-                    // Auto-detect phone number in message → send lead report
-                    if (history.length >= 4) {
+                    // Send lead report to Telegram
+                    if (history.length >= 2) {
                         sendLeadReport(customerPhone, customerName).catch(console.error);
                     }
                 }
