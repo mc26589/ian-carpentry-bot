@@ -155,15 +155,15 @@ async function callGemini(history: ChatMessage[], userMessage: string): Promise<
 
 // --- WhatsApp Cloud API Helpers ---
 
-async function sendWhatsAppMessage(to: string, text: string): Promise<void> {
-    if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
-        console.error('[WhatsApp] CRITICAL: Missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID in environment variables!');
+async function sendWhatsAppMessageWithId(phoneId: string, to: string, text: string): Promise<void> {
+    if (!WHATSAPP_ACCESS_TOKEN) {
+        console.error('[WhatsApp] CRITICAL: Missing WHATSAPP_ACCESS_TOKEN in environment variables!');
         return;
     }
 
     try {
-        const url = `${WA_API_BASE}/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
-        console.log(`[WhatsApp] Sending reply to ${to} using Phone ID ${WHATSAPP_PHONE_NUMBER_ID}...`);
+        const url = `${WA_API_BASE}/${phoneId}/messages`;
+        console.log(`[WhatsApp] Sending reply to ${to} using Phone ID ${phoneId}...`);
         const res = await fetch(url, {
             method: 'POST',
             headers: {
@@ -293,18 +293,25 @@ export default async function handler(
         return;
     }
 
-    // Always respond 200 immediately to Meta (prevent retries)
-    res.status(200).json({ status: 'ok' });
-
     try {
         const body: WhatsAppWebhookBody = req.body;
 
-        if (body.object !== 'whatsapp_business_account') return;
-        if (!body.entry || body.entry.length === 0) return;
+        if (body.object !== 'whatsapp_business_account') {
+            res.status(200).json({ status: 'ignored' });
+            return;
+        }
+        if (!body.entry || body.entry.length === 0) {
+            res.status(200).json({ status: 'no_entry' });
+            return;
+        }
 
         for (const entry of body.entry) {
             for (const change of entry.changes) {
                 const value = change.value;
+
+                // Dynamically fallback to phone_number_id from incoming message metadata
+                const incomingPhoneId = value.metadata?.phone_number_id;
+                const effectivePhoneId = WHATSAPP_PHONE_NUMBER_ID || incomingPhoneId || '';
 
                 // Skip status updates (delivered, read, etc.)
                 if (!value.messages || value.messages.length === 0) continue;
@@ -324,16 +331,18 @@ export default async function handler(
                     const customerName = value.contacts?.[0]?.profile?.name || 'לקוח';
                     const userText = message.text.body.trim();
 
-                    console.log(`[WhatsApp] Message from ${customerName} (${customerPhone}): ${userText}`);
+                    console.log(`[WhatsApp] Processing message from ${customerName} (${customerPhone}): "${userText}"`);
 
                     // Mark as read (shows blue checkmarks)
-                    markMessageAsRead(message.id).catch(console.error);
+                    markMessageAsRead(message.id).catch(() => {});
 
                     // Load conversation history
                     const history = await loadHistory(customerPhone);
 
                     // Call Gemini AI
+                    console.log(`[WhatsApp] Calling Gemini for ${customerPhone}...`);
                     const aiResponse = await callGemini(history, userText);
+                    console.log(`[WhatsApp] Gemini reply: "${aiResponse}"`);
 
                     // Save updated history
                     history.push({ role: 'user', text: userText });
@@ -341,17 +350,23 @@ export default async function handler(
                     await saveHistory(customerPhone, history);
 
                     // Send AI response back via WhatsApp
-                    await sendWhatsAppMessage(customerPhone, aiResponse);
+                    const targetPhoneId = effectivePhoneId;
+                    if (!targetPhoneId) {
+                        console.error('[WhatsApp] No phone number ID available to send message!');
+                    } else {
+                        await sendWhatsAppMessageWithId(targetPhoneId, customerPhone, aiResponse);
+                    }
 
                     // Auto-detect phone number in message → send lead report
-                    // (In WhatsApp we already have the phone, so send report after ~3 messages)
-                    if (history.length >= 6) { // 3 user + 3 model messages = meaningful conversation
+                    if (history.length >= 4) {
                         sendLeadReport(customerPhone, customerName).catch(console.error);
                     }
                 }
             }
         }
+        res.status(200).json({ status: 'ok' });
     } catch (error) {
         console.error('[WhatsApp Webhook] Unhandled error:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
     }
 }
