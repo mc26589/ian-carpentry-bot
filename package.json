@@ -3,9 +3,6 @@
   "version": "1.0.0",
   "description": "Telegram AI Sales Agent for Ian's Carpentry Workshop",
   "type": "module",
-  "scripts": {
-    "build": "tsc --noEmit"
-  },
   "dependencies": {
     "@google/genai": "^1.0.0",
     "@vercel/kv": "^3.0.0",
