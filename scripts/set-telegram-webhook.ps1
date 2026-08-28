@@ -5,7 +5,7 @@
 #   .\scripts\set-telegram-webhook.ps1
 
 param(
-    [string]$Token = $env:TELEGRAM_BOT_TOKEN,
+    [string]$Token = $(if ($env:TELEGRAM_BOT_TOKEN) { $env:TELEGRAM_BOT_TOKEN } else { "8668769747:AAFFKofq4oKS2pXjeHrcm2mfqANCXIJbDD0" }),
     [string]$Domain = $(if ($env:VERCEL_DOMAIN) { $env:VERCEL_DOMAIN } else { "ian-carpentry-bot.vercel.app" })
 )
 
