@@ -71,29 +71,47 @@ function sessionKey(userId: number): string {
     return `session:${userId}`;
 }
 
+function extractPhoneFromMessages(messages: string[]): string | null {
+    for (const msg of messages) {
+        const match = msg.match(/(?:05\d[-\s]?\d{7}|0[23489][-\s]?\d{7}|\+972[-\s]?\d{1,2}[-\s]?\d{7}|\b\d{9,10}\b)/);
+        if (match) return match[0];
+    }
+    return null;
+}
+
 /**
  * End a user's session and send summary to admin group
  */
-async function endUserSession(userId: number): Promise<void> {
+async function endUserSession(userId: number, chatId?: number, firstName?: string, username?: string): Promise<void> {
     try {
-        const session = await kv.get<UserSession>(sessionKey(userId));
-        if (!session) return;
+        let session = await kv.get<UserSession>(sessionKey(userId));
+        let messages = session?.messages_history || [];
 
-        // Format the conversation report
-        const userLabel = session.username
-            ? `@${session.username}`
-            : session.first_name;
+        // Fallback: if session in KV is empty, pull from conversation history
+        if (messages.length === 0 && chatId) {
+            const hist = await loadHistory(chatId);
+            messages = hist.map(h => `${h.role === 'user' ? 'לקוח' : 'נגר'}: ${h.text}`);
+        }
+
+        const userLabel = (session?.username || username)
+            ? `@${session?.username || username}`
+            : (session?.first_name || firstName || 'לקוח');
+
+        const detectedPhone = extractPhoneFromMessages(messages);
 
         let report = `🪚 *ליד חדש — נגריית איאן*\n\n`;
-        report += `👤 *שם:* ${session.first_name}\n`;
+        report += `👤 *שם:* ${session?.first_name || firstName || 'לא צוין'}\n`;
         report += `📱 *יוזר:* ${userLabel}\n`;
-        report += `🆔 *User ID:* \`${session.user_id}\`\n\n`;
-        report += `💬 *תמליל שיחה:*\n`;
+        report += `🆔 *User ID:* \`${userId}\`\n`;
+        if (detectedPhone) {
+            report += `📞 *טלפון שנקלט:* \`${detectedPhone}\` 🎯\n`;
+        }
+        report += `\n💬 *תמליל השיחה:*\n`;
 
-        if (session.messages_history.length === 0) {
-            report += `_אין הודעות_`;
+        if (messages.length === 0) {
+            report += `_אין הודעות זמינות_\n`;
         } else {
-            session.messages_history.forEach((msg, index) => {
+            messages.forEach((msg, index) => {
                 const truncatedMsg = msg.length > 200 ? msg.substring(0, 200) + '...' : msg;
                 report += `${index + 1}. ${truncatedMsg}\n`;
             });
@@ -103,10 +121,9 @@ async function endUserSession(userId: number): Promise<void> {
 
         // Send report to admin group
         await sendTelegramMessage(ADMIN_GROUP_ID, report);
+        console.log(`[Session] Lead report sent to admin group for user ${userId}`);
 
-        console.log(`[Session] Session ended for user ${userId}, report sent to admin`);
-
-        // Clear session
+        // Clear session from KV
         await kv.del(sessionKey(userId));
         await kv.srem(ACTIVE_USERS_KEY, userId.toString());
     } catch (error) {
@@ -117,12 +134,11 @@ async function endUserSession(userId: number): Promise<void> {
 /**
  * Handle incoming message — update session tracking
  */
-async function handleUserMessage(userId: number, firstName: string, username: string | undefined, messageText: string): Promise<void> {
+async function handleUserMessage(userId: number, firstName: string, username: string | undefined, messageText: string, chatId: number): Promise<void> {
     try {
         let session = await kv.get<UserSession>(sessionKey(userId));
 
         if (!session) {
-            // Create new session
             session = {
                 user_id: userId,
                 first_name: firstName,
@@ -133,16 +149,23 @@ async function handleUserMessage(userId: number, firstName: string, username: st
             await kv.sadd(ACTIVE_USERS_KEY, userId.toString());
         }
 
-        // Append message to history
+        // Append message
         session.messages_history.push(messageText);
-
-        // Update user info and activity timestamp
         session.first_name = firstName;
         session.username = username;
         session.last_activity = Date.now();
 
         await kv.set(sessionKey(userId), session);
-        console.log(`[Session] Session updated for user ${userId}`);
+
+        // Auto-detect phone number: if customer just provided a phone number, send lead report immediately!
+        const hasPhone = /(?:05\d[-\s]?\d{7}|0[23489][-\s]?\d{7}|\+972[-\s]?\d{1,2}[-\s]?\d{7}|\b\d{9,10}\b)/.test(messageText);
+        if (hasPhone) {
+            console.log(`[Lead] Phone detected from user ${userId}, dispatching real-time lead report`);
+            // Run report delivery in background without blocking response
+            setTimeout(() => {
+                endUserSession(userId, chatId, firstName, username).catch(console.error);
+            }, 1000);
+        }
     } catch (error) {
         console.error('[KV] Error updating session:', error);
     }
@@ -375,7 +398,7 @@ export default async function handler(
 
         // Handle /end command to manually trigger handover
         if (isPrivateChat && (userText === '/end' || userText === '/סיום')) {
-            await endUserSession(userId);
+            await endUserSession(userId, chatId, firstName, username);
             await sendTelegramMessage(chatId, '🙏 תודה על הפנייה! צוות נגריית איאן יחזור אליך בהקדם.');
             res.status(200).json({ ok: true });
             return;
@@ -383,7 +406,7 @@ export default async function handler(
 
         // Update user session for private chats
         if (isPrivateChat) {
-            await handleUserMessage(userId, firstName, username, userText);
+            await handleUserMessage(userId, firstName, username, userText, chatId);
         }
 
         // --- Handle /start command ---
