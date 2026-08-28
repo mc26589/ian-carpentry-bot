@@ -156,8 +156,14 @@ async function callGemini(history: ChatMessage[], userMessage: string): Promise<
 // --- WhatsApp Cloud API Helpers ---
 
 async function sendWhatsAppMessage(to: string, text: string): Promise<void> {
+    if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+        console.error('[WhatsApp] CRITICAL: Missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID in environment variables!');
+        return;
+    }
+
     try {
         const url = `${WA_API_BASE}/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+        console.log(`[WhatsApp] Sending reply to ${to} using Phone ID ${WHATSAPP_PHONE_NUMBER_ID}...`);
         const res = await fetch(url, {
             method: 'POST',
             headers: {
@@ -173,9 +179,11 @@ async function sendWhatsAppMessage(to: string, text: string): Promise<void> {
             }),
         });
 
+        const resData = await res.text();
         if (!res.ok) {
-            const errBody = await res.text();
-            console.error(`[WhatsApp] sendMessage failed (${res.status}):`, errBody);
+            console.error(`[WhatsApp] sendMessage failed (${res.status}):`, resData);
+        } else {
+            console.log(`[WhatsApp] sendMessage SUCCESS (${res.status}):`, resData);
         }
     } catch (error) {
         console.error('[WhatsApp] sendMessage exception:', error);
