@@ -36,6 +36,16 @@ const WA_API_BASE = 'https://graph.facebook.com/v21.0';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const aiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
+// --- Startup Diagnostic ---
+console.log('[STARTUP] Env check:',
+    'WA_TOKEN=' + (WHATSAPP_ACCESS_TOKEN ? WHATSAPP_ACCESS_TOKEN.substring(0,10)+'...' : 'MISSING'),
+    '| PHONE_ID=' + WHATSAPP_PHONE_NUMBER_ID,
+    '| SUPABASE_URL=' + (SUPABASE_URL ? SUPABASE_URL.substring(0,30)+'...' : 'MISSING'),
+    '| SUPABASE_KEY=' + (SUPABASE_KEY ? SUPABASE_KEY.substring(0,20)+'...' : 'MISSING'),
+    '| GEMINI_KEY=' + (GEMINI_API_KEY ? GEMINI_API_KEY.substring(0,10)+'...' : 'MISSING'),
+    '| TG_TOKEN=' + (TELEGRAM_BOT_TOKEN ? TELEGRAM_BOT_TOKEN.substring(0,10)+'...' : 'MISSING')
+);
+
 // --- Deduplication Cache (In-Memory + Supabase) ---
 const processedMessages = new Set<string>();
 
@@ -132,11 +142,16 @@ async function loadHistory(phone: string): Promise<ChatMessage[]> {
 
 async function saveMessage(phone: string, role: 'user' | 'model', text: string): Promise<void> {
     try {
-        await supabase
+        const { error } = await supabase
             .from('carpentry_messages')
             .insert({ phone, role, content: text });
+        if (error) {
+            console.error('[Supabase] saveMessage INSERT error:', JSON.stringify(error));
+        } else {
+            console.log('[Supabase] saveMessage OK:', role, phone);
+        }
     } catch (err) {
-        console.error('[Supabase] saveMessage error:', err);
+        console.error('[Supabase] saveMessage exception:', err);
     }
 }
 
