@@ -8,7 +8,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
 const ADMIN_GROUP_ID = parseInt(process.env.ADMIN_GROUP_ID || '0', 10);
 
 // --- Constants ---
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 const MAX_HISTORY_MESSAGES = 20;
 const HISTORY_TTL_SECONDS = 900; // 15 minutes
 const TG_MAX_LENGTH = 4096;
