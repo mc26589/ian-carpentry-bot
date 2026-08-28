@@ -1,6 +1,6 @@
 param(
     [string]$Token = $(if ($env:TELEGRAM_BOT_TOKEN) { $env:TELEGRAM_BOT_TOKEN } else { "8668769747:AAFFKofq4oKS2pXjeHrcm2mfqANCXIJbDD0" }),
-    [string]$Domain = $(if ($env:VERCEL_DOMAIN) { $env:VERCEL_DOMAIN } else { "ian-carpentry-bot.vercel.app" })
+    [string]$Domain = $(if ($env:VERCEL_DOMAIN) { $env:VERCEL_DOMAIN } else { "ian-carpentry.vercel.app" })
 )
 
 if (-not $Token) {
