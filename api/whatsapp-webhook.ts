@@ -4,16 +4,28 @@ import { GoogleGenAI } from '@google/genai';
 import crypto from 'node:crypto';
 
 // --- Environment Variables ---
-const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || Buffer.from('RUFBUFBlVjdMUFVBQlNSekFKWkJFWkJuc0ZwbWw2bHB3Szg3SndaQlQ0andFUEZYN1Zod1RJY3dsZDcybGNoTFBlVWFXNlhIVlY3QlM4ZzY5aEJhVExoUWVyVVhVYVBRQmNCaEhUd1lGWkJlcG9RSEtWR0FyM241VURMTjBtaFdGN2NpSlBoblJmZE1KOHRmWUVIcTdwbjBKZ0s3WkFaQjRqa3FXellaQ1c5TnJkZW5Wb2JhTnlucUMycGpHWUZtTXgyVEc1Q2RLYVZSWkJJTncySkZWNDZxU1hmTkdRN2RWODJ0OWdUTVZFaU5CZ3JPRmE5WkFKRUlGT2t3YllPZUE4bnpleHdzNzdZWkFvYThRcHJJNWJBbndaRFpE', 'base64').toString('utf8');
-const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || '919465727924630';
-const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'ian_carpentry_secret_2026';
-const META_APP_SECRET = process.env.META_APP_SECRET || '';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || Buffer.from('QVEuQWI4Uk42S183X3FJMVhXLVMtaDJ0N3JHRzVuLTZaU0ZfZS1YTmRGeTJrNV9vM2EwMnc=', 'base64').toString('utf8');
-const ADMIN_GROUP_ID = parseInt(process.env.ADMIN_GROUP_ID || '-5472650764', 10);
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8668769747:AAFFKofq4oKS2pXjeHrcm2mfqANCXIJbDD0';
+// SECURITY: No hardcoded fallback secrets. All values MUST come from
+// Vercel Project Settings -> Environment Variables. The process will
+// fail fast at import time if a required secret is missing, instead of
+// silently falling back to a leaked/expired credential.
+function requireEnv(name: string): string {
+    const value = process.env[name];
+    if (!value) {
+        throw new Error(`Missing required environment variable: ${name}`);
+    }
+    return value;
+}
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://jmftbcfdcssmxozzaqav.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImptZnRiY2ZkY3NzbXhvenphcWF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE1OTkzMDUsImV4cCI6MjA4NzE3NTMwNX0.nXRcpaAX-L15LZ62_W3fyynAFj6QEsAlma8CHa3Ne4s';
+const WHATSAPP_ACCESS_TOKEN = requireEnv('WHATSAPP_ACCESS_TOKEN');
+const WHATSAPP_PHONE_NUMBER_ID = requireEnv('WHATSAPP_PHONE_NUMBER_ID');
+const WHATSAPP_VERIFY_TOKEN = requireEnv('WHATSAPP_VERIFY_TOKEN');
+const META_APP_SECRET = process.env.META_APP_SECRET || '';
+const GEMINI_API_KEY = requireEnv('GEMINI_API_KEY');
+const ADMIN_GROUP_ID = parseInt(process.env.ADMIN_GROUP_ID || '0', 10);
+const TELEGRAM_BOT_TOKEN = requireEnv('TELEGRAM_BOT_TOKEN');
+
+const SUPABASE_URL = requireEnv('SUPABASE_URL');
+const SUPABASE_KEY = requireEnv('SUPABASE_KEY');
 
 // --- Constants ---
 const GEMINI_MODEL = 'gemini-3.7-flash';
