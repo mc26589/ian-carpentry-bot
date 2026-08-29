@@ -4,10 +4,6 @@ import { GoogleGenAI } from '@google/genai';
 import crypto from 'node:crypto';
 
 // --- Environment Variables ---
-// SECURITY: No hardcoded fallback secrets. All values MUST come from
-// Vercel Project Settings -> Environment Variables. The process will
-// fail fast at import time if a required secret is missing, instead of
-// silently falling back to a leaked/expired credential.
 function requireEnv(name: string): string {
     const value = process.env[name];
     if (!value) {
@@ -30,31 +26,30 @@ const SUPABASE_KEY = requireEnv('SUPABASE_KEY');
 // --- Constants ---
 const GEMINI_MODEL = 'gemini-3.5-flash-lite';
 const GEMINI_FALLBACK_MODEL = 'gemini-3.6-flash';
-const MAX_HISTORY_MESSAGES = 16;
+const MAX_HISTORY_MESSAGES = 25;
 const WA_API_BASE = 'https://graph.facebook.com/v21.0';
 
 // --- Clients ---
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const aiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-// --- Startup Diagnostic ---
-console.log('[STARTUP] Env check:',
-    'WA_TOKEN=' + (WHATSAPP_ACCESS_TOKEN ? WHATSAPP_ACCESS_TOKEN.substring(0,10)+'...' : 'MISSING'),
-    '| PHONE_ID=' + WHATSAPP_PHONE_NUMBER_ID,
-    '| SUPABASE_URL=' + (SUPABASE_URL ? SUPABASE_URL.substring(0,30)+'...' : 'MISSING'),
-    '| SUPABASE_KEY=' + (SUPABASE_KEY ? SUPABASE_KEY.substring(0,20)+'...' : 'MISSING'),
-    '| GEMINI_KEY=' + (GEMINI_API_KEY ? GEMINI_API_KEY.substring(0,10)+'...' : 'MISSING'),
-    '| TG_TOKEN=' + (TELEGRAM_BOT_TOKEN ? TELEGRAM_BOT_TOKEN.substring(0,10)+'...' : 'MISSING')
-);
-
-// --- Deduplication Cache (In-Memory + Supabase) ---
+// --- Deduplication Cache ---
 const processedMessages = new Set<string>();
 
-// --- Types (from SKILL.md) ---
+// --- Types ---
 
 interface ChatMessage {
     role: 'user' | 'model';
     text: string;
+}
+
+interface LeadProfile {
+    customer_name?: string;
+    project_type?: string;
+    dimensions?: string;
+    location?: string;
+    notes?: string;
+    conversation_summary?: string;
 }
 
 interface WhatsAppMessage {
@@ -92,18 +87,37 @@ interface WhatsAppWebhookBody {
 
 // --- System Instruction for Ian the Carpenter ---
 
-const SYSTEM_INSTRUCTION = `אתה איאן (הנגר הראשי מנגריית הבוטיק "נגריית איאן").
+const BASE_SYSTEM_INSTRUCTION = `אתה איאן (הנגר הראשי מנגריית הבוטיק "נגריית איאן").
 אתה נגר מקצועי, יסודי, אדיב, ענייני ומדבר ישירות כבן אדם — לא כמו צ'אטבוט או איש מכירות רובוטי.
 
 חוקי זהב קריטיים:
 1. שאלה אחת בלבד בכל הודעה: לעולם אל תשאל שתי שאלות או רשימת שאלות. התמקד רק בפרט אחד בכל פעם (למשל: סוג הדלתות, מידות, או אזור מגורים).
 2. בלי סיסמאות שיווקיות: לעולם אל תגיד "אצלנו בנגריית איאן", "אנחנו שואפים ל..." או פראזות מוגזמות. דבר ישיר: "אני יכול לבצע את זה", "עובדים בעיקר עם סנדוויץ' בירץ' ופורמייקה", "בכיף".
 3. תגובות קצרות ונוחות לוואטסאפ: 1 עד 2 משפטים קצרים וממוקדים בלבד!
-4. זיכרון והקשבה: קרא את כל היסטוריית השיחה. אל תשאל שוב על דברים שהלקוח כבר אמר.
-5. תמונות והודעות קוליות: אם הלקוח שלח תמונה של רהיט או השראה, התייחס לסגנון שבתמונה. אם שלח הודעה קולית, ענה ישירות למה שביקש בקולו.
-6. מחירים והתקדמות: אל תמציא מחיר מדויק מראש. אמור: "העלות תלויה במידות ובפרזול. כדי שאתן הצעה מדויקת וללא התחייבות, מה המידות בערך ובאיזה אזור בארץ מדובר?"`;
+4. זיכרון מוחלט: קרא בעיון את כרטיס הלקוח ואת כל היסטוריית השיחה. ⚠️ לעולם אל תשאל שוב על דברים שכבר נמסרו (כמו מידות, אזור מגורים, צבע, או סוג הרהיט)!
+5. שאלות על מחיר:
+   - אם המידות והאזור כבר נמסרו (למשל 240x240 במוצקין): התייחס ישירות למידות ולאזור שכבר נמסרו! הסבר שהעלות תלויה בחלוקה הפנימית ובפרזול, והצע פגישת ייעוץ ומדידה ללא עלות וללא התחייבות כדי לתת מחיר סופי ומדויק.
+   - אם חסרות מידות או אזור: שאל בצורה ממוקדת רק על הפרט שחסר.
+6. תמונות והודעות קוליות: אם הלקוח שלח תמונה של רהיט או השראה, התייחס לסגנון שבתמונה. אם שלח הודעה קולית, ענה ישירות למה שביקש בקולו.`;
 
-// --- HMAC Signature Verification (SKILL.md 2.B) ---
+function buildDynamicSystemInstruction(lead: LeadProfile | null, customerName: string): string {
+    const facts: string[] = [];
+    if (lead?.customer_name || customerName) facts.push(`שם הלקוח: ${lead?.customer_name || customerName}`);
+    if (lead?.project_type) facts.push(`סוג הרהיט: ${lead.project_type}`);
+    if (lead?.dimensions) facts.push(`מידות שכבר ידועות ונמסרו: ${lead.dimensions} ⚠️ (אל תשאל שוב על מידות!)`);
+    if (lead?.location) facts.push(`אזור בארץ שכבר נמסר: ${lead.location} ⚠️ (אל תשאל שוב על אזור מגורים!)`);
+    if (lead?.notes) facts.push(`פרטים שכבר סוכמו: ${lead.notes}`);
+    if (lead?.conversation_summary) facts.push(`תקציר היסטוריה קודמת: ${lead.conversation_summary}`);
+
+    let memoryContext = '';
+    if (facts.length > 0) {
+        memoryContext = `\n\n📌 כרטיס לקוח וזיכרון קבוע מה-Database (גם משיחות קודמות):\n${facts.map(f => `• ${f}`).join('\n')}\n\n⚠️ חוק ברזל: הלקוח כבר נתן את הפרטים הללו. אל תשאל עליהם שוב! השתמש בהם ישירות בתשובתך.`;
+    }
+
+    return `${BASE_SYSTEM_INSTRUCTION}${memoryContext}`;
+}
+
+// --- HMAC Signature Verification ---
 
 function verifyMetaSignature(rawBody: string | Buffer, signatureHeader: string | undefined, appSecret: string): boolean {
     if (!signatureHeader || !signatureHeader.startsWith('sha256=')) return false;
@@ -126,11 +140,12 @@ async function loadHistory(phone: string): Promise<ChatMessage[]> {
             .from('carpentry_messages')
             .select('role, content')
             .eq('phone', phone)
-            .order('created_at', { ascending: true })
+            .order('created_at', { ascending: false }) // NEWEST FIRST
             .limit(MAX_HISTORY_MESSAGES);
 
         if (!error && data && data.length > 0) {
-            return data.map(m => ({
+            // Reverse so oldest of the batch comes first (chronological order)
+            return data.reverse().map(m => ({
                 role: m.role as 'user' | 'model',
                 text: m.content
             }));
@@ -139,6 +154,23 @@ async function loadHistory(phone: string): Promise<ChatMessage[]> {
         console.error('[Supabase] loadHistory error:', err);
     }
     return [];
+}
+
+async function loadLeadProfile(phone: string): Promise<LeadProfile | null> {
+    try {
+        const { data, error } = await supabase
+            .from('carpentry_leads')
+            .select('customer_name, project_type, dimensions, location, notes, conversation_summary')
+            .eq('phone', phone)
+            .maybeSingle();
+
+        if (!error && data) {
+            return data as LeadProfile;
+        }
+    } catch (err) {
+        console.error('[Supabase] loadLeadProfile error:', err);
+    }
+    return null;
 }
 
 async function saveMessage(phone: string, role: 'user' | 'model', text: string): Promise<void> {
@@ -156,23 +188,87 @@ async function saveMessage(phone: string, role: 'user' | 'model', text: string):
     }
 }
 
-async function upsertLead(phone: string, customerName: string, notes?: string): Promise<void> {
+// --- Entity Extraction & Lead Memory Updating ---
+
+function extractLeadEntities(text: string, existingLead: LeadProfile | null): Partial<LeadProfile> {
+    const updates: Partial<LeadProfile> = {};
+
+    // 1. Dimensions extraction (e.g., 240 על 240, 240x240, 2.40 על 2 מטר, 200/240, 10 מדפים ו-8 מגירות)
+    const dimMatch = text.match(/(?:\b\d{2,3}(?:\.\d+)?\s*(?:על|X|x|\*|ס"מ|מטר|מ')\s*\d{2,3}(?:\.\d+)?(?:\s*(?:על|X|x|\*)\s*\d{2,3})?|\b(?:\d(?:\.\d+)?)\s*מטר\s*על\s*(?:\d(?:\.\d+)?)\s*מטר|\b\d+\s*מדפים\s*(?:ו-?|\+)?\s*\d+\s*מגירות)/i);
+    if (dimMatch) {
+        updates.dimensions = dimMatch[0].trim();
+    } else if (!existingLead?.dimensions && text.match(/\b\d{2,3}\s*(?:על|X|x)\s*\d{2,3}\b/i)) {
+        updates.dimensions = text.match(/\b\d{2,3}\s*(?:על|X|x)\s*\d{2,3}\b/i)![0];
+    }
+
+    // 2. Location extraction (cities, regions in Israel)
+    const locationKeywords = [
+        'קרית מוצקין', 'קריית מוצקין', 'מוצקין', 'קרית ביאליק', 'קריית ביאליק', 'ביאליק',
+        'קרית אתא', 'קריית אתא', 'קרית ים', 'קריית ים', 'קריות', 'חיפה', 'נשר', 'טירת כרמל',
+        'עכו', 'נהריה', 'כרמיאל', 'עפולה', 'נצרת', 'טבריה', 'חדרה', 'נתניה', 'כפר סבא',
+        'רעננה', 'הרצליה', 'רמת השרון', 'תל אביב', 'רמת גן', 'גבעתיים', 'פתח תקווה', 'בני ברק',
+        'חולון', 'בת ים', 'ראשון לציון', 'ראשל"צ', 'רחובות', 'נס ציונה', 'אשדוד', 'אשקלון',
+        'באר שבע', 'מודיעין', 'ירושלים', 'צפון', 'מרכז', 'דרום', 'שרון'
+    ];
+    for (const loc of locationKeywords) {
+        if (text.includes(loc)) {
+            updates.location = loc.startsWith('מוצקין') ? 'קרית מוצקין' : (loc.startsWith('ביאליק') ? 'קרית ביאליק' : loc);
+            break;
+        }
+    }
+
+    // 3. Project type extraction
+    const projectKeywords = [
+        'ארון בגדים', 'ארון הזזה', 'ארון פתיחה', 'ארון קיר', 'ארון שירות', 'ארון',
+        'מטבח', 'אי למטבח', 'מזנון', 'מזנון טלוויזיה', 'שולחן עץ', 'שולחן אוכל', 'שולחן סלון', 'שולחן',
+        'חדר ארונות', 'ספריה', 'כוורת', 'שידה', 'דלתות פנים', 'דלתות הזזה', 'פרגולה', 'דק'
+    ];
+    for (const proj of projectKeywords) {
+        if (text.includes(proj)) {
+            updates.project_type = proj;
+            break;
+        }
+    }
+
+    return updates;
+}
+
+async function updateLeadMemory(phone: string, customerName: string, userText: string, aiResponse: string, existingLead: LeadProfile | null): Promise<void> {
     try {
+        const extracted = extractLeadEntities(userText, existingLead);
+        
+        const finalProjectType = extracted.project_type || existingLead?.project_type || 'ריהוט בהתאמה אישית';
+        const finalDimensions = extracted.dimensions || existingLead?.dimensions || null;
+        const finalLocation = extracted.location || existingLead?.location || null;
+        
+        let summaryParts: string[] = [];
+        if (finalProjectType) summaryParts.push(`פרויקט: ${finalProjectType}`);
+        if (finalDimensions) summaryParts.push(`מידות: ${finalDimensions}`);
+        if (finalLocation) summaryParts.push(`אזור: ${finalLocation}`);
+        
+        const currentSummary = summaryParts.join(' | ');
+
         await supabase
             .from('carpentry_leads')
             .upsert({
                 phone,
-                customer_name: customerName,
+                customer_name: customerName || existingLead?.customer_name || 'לקוח',
                 platform: 'whatsapp',
-                notes,
+                project_type: finalProjectType,
+                dimensions: finalDimensions,
+                location: finalLocation,
+                notes: userText.length > 5 ? userText : existingLead?.notes,
+                conversation_summary: currentSummary,
                 updated_at: new Date().toISOString()
             }, { onConflict: 'phone' });
+
+        console.log(`[Supabase] Lead memory updated for ${phone}: ${currentSummary}`);
     } catch (err) {
-        console.error('[Supabase] upsertLead error:', err);
+        console.error('[Supabase] updateLeadMemory error:', err);
     }
 }
 
-// --- WhatsApp Media Downloader (SKILL.md Section 5) ---
+// --- WhatsApp Media Downloader ---
 
 async function downloadWhatsAppMedia(mediaId: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
     try {
@@ -196,7 +292,7 @@ async function downloadWhatsAppMedia(mediaId: string): Promise<{ buffer: Buffer;
     }
 }
 
-// --- Outbound WhatsApp Message Senders (SKILL.md Section 4) ---
+// --- Outbound WhatsApp Message Senders ---
 
 async function sendTextMessage(phoneId: string, to: string, text: string): Promise<void> {
     try {
@@ -284,18 +380,22 @@ function buildValidContents(history: ChatMessage[], newUserText: string, mediaAt
 async function generateIanResponse(
     history: ChatMessage[],
     userText: string,
+    lead: LeadProfile | null,
+    customerName: string,
     mediaAttachment?: { buffer: Buffer; mimeType: string }
 ): Promise<string> {
     const contents = buildValidContents(history, userText, mediaAttachment);
+    const systemInstruction = buildDynamicSystemInstruction(lead, customerName);
+
     try {
         const response = await aiClient.models.generateContent({
             model: GEMINI_MODEL,
             contents,
             config: {
-                temperature: 0.3,
+                temperature: 0.25,
                 topP: 0.85,
                 maxOutputTokens: 150,
-                systemInstruction: SYSTEM_INSTRUCTION,
+                systemInstruction,
             },
         });
         const text = response.text?.trim();
@@ -310,9 +410,9 @@ async function generateIanResponse(
             model: GEMINI_FALLBACK_MODEL,
             contents,
             config: {
-                temperature: 0.3,
+                temperature: 0.25,
                 maxOutputTokens: 150,
-                systemInstruction: SYSTEM_INSTRUCTION,
+                systemInstruction,
             },
         });
         const text = fallbackRes.text?.trim();
@@ -326,14 +426,18 @@ async function generateIanResponse(
 
 // --- Lead Reporting (Instant Telegram Alert) ---
 
-async function sendLeadReport(phone: string, customerName: string): Promise<void> {
+async function sendLeadReport(phone: string, customerName: string, lead: LeadProfile | null): Promise<void> {
     if (!ADMIN_GROUP_ID || !TELEGRAM_BOT_TOKEN) return;
 
     try {
         const history = await loadHistory(phone);
-        let report = `🪵 *ליד חדש מוואטסאפ — נגריית איאן*\n\n`;
+        let report = `🪵 *ליד מעודכן מוואטסאפ — נגריית איאן*\n\n`;
         report += `👤 *שם:* ${customerName}\n`;
         report += `📞 *טלפון:* [${phone}](https://wa.me/${phone}) 🎯\n`;
+        if (lead?.project_type) report += `🪚 *פרויקט:* ${lead.project_type}\n`;
+        if (lead?.dimensions) report += `📐 *מידות:* ${lead.dimensions}\n`;
+        if (lead?.location) report += `📍 *אזור:* ${lead.location}\n`;
+        
         report += `\n💬 *תמליל השיחה האחרונה:*\n`;
 
         history.slice(-8).forEach((msg, i) => {
@@ -386,7 +490,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         return;
     }
 
-    // 1. Webhook Verification (GET /webhook - SKILL.md Section 2.A)
+    // 1. Webhook Verification (GET /webhook)
     if (req.method === 'GET') {
         const mode = req.query['hub.mode'] as string;
         const token = req.query['hub.verify_token'] as string;
@@ -427,7 +531,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
                 const incomingPhoneId = value.metadata?.phone_number_id;
                 const effectivePhoneId = WHATSAPP_PHONE_NUMBER_ID || incomingPhoneId || '';
 
-                // Ignore status callbacks (sent, delivered, read) to prevent self loops (SKILL.md 2.C)
+                // Ignore status callbacks (sent, delivered, read) to prevent self loops
                 if (!value.messages || value.messages.length === 0) continue;
 
                 for (const message of value.messages) {
@@ -456,14 +560,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
                     } else if (message.type === 'interactive') {
                         userText = message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || '';
                     } else if (message.type === 'audio' && message.audio?.id) {
-                        // Voice Note Processing (SKILL.md Section 5 & 6.4)
                         const audioData = await downloadWhatsAppMedia(message.audio.id);
                         if (audioData) {
                             mediaAttachment = audioData;
                             userText = '[הודעה קולית מהלקוח]';
                         }
                     } else if (message.type === 'image' && message.image?.id) {
-                        // Image Inspiration Processing (SKILL.md Section 5)
                         const imgData = await downloadWhatsAppMedia(message.image.id);
                         if (imgData) {
                             mediaAttachment = imgData;
@@ -481,28 +583,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
                     // Mark as read immediately in parallel
                     markMessageAsRead(effectivePhoneId, messageId).catch(() => {});
 
-                    // Load past conversation history from Supabase
-                    const history = await loadHistory(customerPhone);
+                    // Load past conversation history AND permanent lead profile from Supabase in parallel
+                    const [history, leadProfile] = await Promise.all([
+                        loadHistory(customerPhone),
+                        loadLeadProfile(customerPhone)
+                    ]);
 
-                    // Call Gemini AI agent (ultra-fast <1s model)
-                    const aiResponse = await generateIanResponse(history, userText, mediaAttachment);
+                    // Call Gemini AI agent with full persistent memory
+                    const aiResponse = await generateIanResponse(history, userText, leadProfile, customerName, mediaAttachment);
                     console.log(`[WhatsApp Reply] To ${customerPhone}: "${aiResponse}"`);
 
-                    // 1. Send outbound WhatsApp reply IMMEDIATELY to avoid any latency for user!
+                    // 1. Send outbound WhatsApp reply IMMEDIATELY to eliminate user latency
                     if (effectivePhoneId) {
                         await sendTextMessage(effectivePhoneId, customerPhone, aiResponse);
                     } else {
                         console.error('[WhatsApp] Missing phone number ID for outbound reply');
                     }
 
-                    // 2. Persist to DB and send telegram alert in parallel
+                    // 2. Persist messages, update structured memory in DB, and send telegram report in parallel
                     const postTasks: Promise<any>[] = [
                         saveMessage(customerPhone, 'user', userText),
                         saveMessage(customerPhone, 'model', aiResponse),
-                        upsertLead(customerPhone, customerName, userText)
+                        updateLeadMemory(customerPhone, customerName, userText, aiResponse, leadProfile)
                     ];
                     if (history.length >= 2 || userText.length > 20) {
-                        postTasks.push(sendLeadReport(customerPhone, customerName));
+                        postTasks.push(sendLeadReport(customerPhone, customerName, leadProfile));
                     }
                     await Promise.allSettled(postTasks);
                 }
