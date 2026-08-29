@@ -28,7 +28,8 @@ const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_KEY = requireEnv('SUPABASE_KEY');
 
 // --- Constants ---
-const GEMINI_MODEL = 'gemini-3.7-flash';
+const GEMINI_MODEL = 'gemini-3.5-flash-lite';
+const GEMINI_FALLBACK_MODEL = 'gemini-3.6-flash';
 const MAX_HISTORY_MESSAGES = 16;
 const WA_API_BASE = 'https://graph.facebook.com/v21.0';
 
@@ -285,23 +286,42 @@ async function generateIanResponse(
     userText: string,
     mediaAttachment?: { buffer: Buffer; mimeType: string }
 ): Promise<string> {
+    const contents = buildValidContents(history, userText, mediaAttachment);
     try {
-        const contents = buildValidContents(history, userText, mediaAttachment);
         const response = await aiClient.models.generateContent({
             model: GEMINI_MODEL,
             contents,
             config: {
                 temperature: 0.3,
                 topP: 0.85,
-                maxOutputTokens: 250,
+                maxOutputTokens: 150,
                 systemInstruction: SYSTEM_INSTRUCTION,
             },
         });
-        return response.text?.trim() || 'שלום! איזה רהיט תרצה שנתכנן עבורך?';
+        const text = response.text?.trim();
+        if (text) return text;
     } catch (err: any) {
-        console.error('[Gemini] Generation error:', err?.message || err);
-        return 'בכיף, אשמח לעזור לך. ספר לי איזה רהיט אתה מעוניין לבנות ומה המידות בערך?';
+        console.error('[Gemini 3.5] Generation error:', err?.message || err);
     }
+
+    // Fast fallback to Gemini 3.6 Flash
+    try {
+        const fallbackRes = await aiClient.models.generateContent({
+            model: GEMINI_FALLBACK_MODEL,
+            contents,
+            config: {
+                temperature: 0.3,
+                maxOutputTokens: 150,
+                systemInstruction: SYSTEM_INSTRUCTION,
+            },
+        });
+        const text = fallbackRes.text?.trim();
+        if (text) return text;
+    } catch (err: any) {
+        console.error('[Gemini 3.6 Fallback] error:', err?.message || err);
+    }
+
+    return 'בכיף, אשמח לעזור לך. ספר לי איזה רהיט אתה מעוניין לבנות ומה המידות בערך?';
 }
 
 // --- Lead Reporting (Instant Telegram Alert) ---
@@ -458,34 +478,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
                     console.log(`[WhatsApp Inbound] From ${customerName} (${customerPhone}): "${userText}"`);
 
-                    // Mark as read immediately (shows blue checkmarks - SKILL.md 4.E)
+                    // Mark as read immediately in parallel
                     markMessageAsRead(effectivePhoneId, messageId).catch(() => {});
 
                     // Load past conversation history from Supabase
                     const history = await loadHistory(customerPhone);
 
-                    // Call Gemini AI agent
+                    // Call Gemini AI agent (ultra-fast <1s model)
                     const aiResponse = await generateIanResponse(history, userText, mediaAttachment);
                     console.log(`[WhatsApp Reply] To ${customerPhone}: "${aiResponse}"`);
 
-                    // Save messages to Supabase and upsert lead record
-                    await Promise.all([
-                        saveMessage(customerPhone, 'user', userText),
-                        saveMessage(customerPhone, 'model', aiResponse),
-                        upsertLead(customerPhone, customerName, userText)
-                    ]);
-
-                    // Send outbound WhatsApp reply
+                    // 1. Send outbound WhatsApp reply IMMEDIATELY to avoid any latency for user!
                     if (effectivePhoneId) {
                         await sendTextMessage(effectivePhoneId, customerPhone, aiResponse);
                     } else {
                         console.error('[WhatsApp] Missing phone number ID for outbound reply');
                     }
 
-                    // Send lead notification to Telegram admin group
+                    // 2. Persist to DB and send telegram alert in parallel
+                    const postTasks: Promise<any>[] = [
+                        saveMessage(customerPhone, 'user', userText),
+                        saveMessage(customerPhone, 'model', aiResponse),
+                        upsertLead(customerPhone, customerName, userText)
+                    ];
                     if (history.length >= 2 || userText.length > 20) {
-                        sendLeadReport(customerPhone, customerName).catch(console.error);
+                        postTasks.push(sendLeadReport(customerPhone, customerName));
                     }
+                    await Promise.allSettled(postTasks);
                 }
             }
         }
