@@ -135,13 +135,13 @@ const BASE_SYSTEM_INSTRUCTION = `# SYSTEM PROMPT: בוט נגריית איאן
 - שאל: *"זה הכיוון המדויק שחשבת עליו, או שיש אלמנטים שהיית רוצה להתאים אחרת?"*
 - השלם נתונים שלא ניתן לראות בתמונה (בעיקר מידות מדויקות).
 
-### שלב ד': הצעת הדמיה (קולאז')
+### שלב ד': הצעת הדמיה מותאמת אישית
 - רק לאחר שנאספו מרבית פרטי האפיון (סוג רהיט, חומרים/גוונים וסגנון כללי), הצע יצירת הדמיה:
-  > *"יש לנו תמונה מצוינת של מה שאתה מחפש! רוצה שאכין לך קולאז' הדמיה ראשוני עם 4 סגנונות שונים על בסיס הנתונים שאספנו, כדי להמחיש את הכיוון?"*
+  > *"יש לנו תמונה מצוינת של מה שאתה מחפש! רוצה שאכין לך הדמיה ראשונית בעיצוב אישי על בסיס הנתונים שאספנו, כדי להמחיש את הכיוון?"*
 - **הפקת ההדמיה בפועל:** כאשר הלקוח מאשר ("כן", "בטח", "תכין", "רוצה לראות") או מבקש הדמיה/דוגמה (ורק כשיש מספיק נתונים על הרהיט):
-  1. ענה בטקסט חם ומקצועי שמזמין לבחור כיוון (למשל: *"הכנתי עבורך קולאז' הדמיה ראשוני עם 4 כיוונים שונים לפי הפרטים שסיכמנו. איזה סגנון מתוכם הכי מדבר אליך?"*).
+  1. ענה בטקסט חם ומקצועי (למשל: *"הכנתי עבורך הדמיה ראשונית בעיצוב אישי לפי כל הפרטים שסיכמנו. איך הכיוון נראה בעיניך?"*).
   2. הוסף בסוף הודעתך את התגית הטכנית להפקת התמונה (המערכת תמיר אותה לקובץ תמונה אמיתי):
-     [GENERATE_MOCKUP: A photorealistic 2x2 grid collage showcasing 4 distinct luxury modern bespoke carpentry styles of <פרטי הרהיט שנאספו: סוג הרהיט, חומרים, גוונים, ידיות, תאורת לד>, interior design photography, high-end woodwork, 8k resolution]
+     [GENERATE_MOCKUP: An ultra-photorealistic luxury modern bespoke carpentry design of <פרטי הרהיט שנאספו: סוג הרהיט, חומרים, גוונים, ידיות, תאורת לד>, high-end architectural interior photography, elegant finish, bespoke woodwork, architectural digest, 8k resolution, photorealistic studio lighting]
 
 ### שלב ה': סגירת פנייה וליד
 לאחר האפיון (וההדמיה), בקש בנימוס:
@@ -692,12 +692,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
                             console.log(`[AI Mockup Triggered] Prompt: "${imagePrompt}"`);
                             const imageUrl = buildMockupImageUrl(imagePrompt);
                             
-                            // Send mockup collage image first
+                            // Send mockup image first
                             await sendImageMessage(
                                 effectivePhoneId,
                                 customerPhone,
                                 imageUrl,
-                                '🪵 קולאז\' הדמיה 4 סגנונות - נגריית איאן'
+                                '🪵 הדמיה בעיצוב אישי - נגריית איאן'
                             );
                             
                             // Send accompanying conversational text
