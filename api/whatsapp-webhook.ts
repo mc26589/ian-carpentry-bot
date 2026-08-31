@@ -148,7 +148,8 @@ const BASE_SYSTEM_INSTRUCTION = `# SYSTEM PROMPT: בוט נגריית איאן
 1. **שם מלא** (במידה וטרם נמסר).
 2. **עיר מגורים / אזור בארץ** (לצורך תיאום הגעה ומדידה).
 ⚠️ **איסור מוחלט:** מספר הטלפון של הלקוח כבר ידוע למערכת מתוך הצ'אט בוואטסאפ. **חל איסור מוחלט לבקש מספר טלפון!**
-- חתום במסר חם ומזמין: *"תודה רבה! העברתי את כל הפרטים לצוות המקצועי של נגריית איאן, ואנחנו ניצור איתך קשר כאן במספר הזה בהקדם להמשך תכנון והצעת מחיר מדויקת."*`;
+- כאשר נמסרו הפרטים הדרושים (או שהלקוח מבקש שנציג ייצור איתו קשר), חתום במסר חם ומזמין והוסף בסוף תשובתך את התגית [LEAD_COMPLETED]:
+  *"תודה רבה! העברתי את כל הפרטים לצוות המקצועי של נגריית איאן, ואנחנו ניצור איתך קשר כאן במספר הזה בהקדם להמשך תכנון והצעת מחיר מדויקת. [LEAD_COMPLETED]"*`;
 
 function buildDynamicSystemInstruction(lead: LeadProfile | null, customerName: string): string {
     const facts: string[] = [];
@@ -513,30 +514,56 @@ async function generateIanResponse(
     return 'בכיף, אשמח לעזור לך. ספר לי איזה רהיט אתה מעוניין לבנות ומה המידות בערך?';
 }
 
-// --- Lead Reporting (Instant Telegram Alert) ---
+// --- Lead Reporting (Concise Telegram Alerts - Completed & Urgent Only) ---
 
-async function sendLeadReport(phone: string, customerName: string, lead: LeadProfile | null): Promise<void> {
+function isUrgentContactRequest(text: string): boolean {
+    const urgentKeywords = [
+        'דחוף', 'דחופה', 'בדחיפות',
+        'בהקדם', 'בהקדם האפשרי',
+        'תתקשרו אלי', 'תתקשר אלי', 'תתקשרו', 'תתקשר',
+        'תחזרו אלי', 'שיחזרו אלי', 'לחזור אלי',
+        'שיצרו איתי קשר', 'ליצור איתי קשר', 'צרו איתי קשר', 'צור איתי קשר',
+        'רוצה לדבר עם נגר', 'רוצה לדבר עם מישהו', 'נציג אנושי', 'לדבר בטלפון',
+        'דברו איתי', 'מחכה לשיחה', 'לחוץ', 'לחוצה'
+    ];
+    return urgentKeywords.some(kw => text.includes(kw));
+}
+
+async function sendLeadReport(
+    phone: string,
+    customerName: string,
+    lead: LeadProfile | null,
+    reason: 'completed' | 'urgent',
+    userMessageSnippet?: string
+): Promise<void> {
     if (!ADMIN_GROUP_ID || !TELEGRAM_BOT_TOKEN) return;
 
     try {
-        const history = await loadHistory(phone);
-        let report = `🪵 *ליד מעודכן מוואטסאפ — נגריית איאן*\n\n`;
-        report += `👤 *שם:* ${customerName}\n`;
-        report += `📞 *טלפון:* [${phone}](https://wa.me/${phone}) 🎯\n`;
+        let report = '';
+        if (reason === 'urgent') {
+            report += `🚨 *דחוף: לקוח מבקש שיצרו איתו קשר בהקדם!* 🚨\n\n`;
+        } else {
+            report += `🪵 *ליד חדש וסגור מוואטסאפ — נגריית איאן* ✅\n\n`;
+        }
+
+        report += `👤 *שם:* ${customerName || lead?.customer_name || 'לא צוין'}\n`;
+        report += `📞 *טלפון:* [${phone}](https://wa.me/${phone})\n`;
         if (lead?.project_type) report += `🪚 *פרויקט:* ${lead.project_type}\n`;
         if (lead?.dimensions) report += `📐 *מידות:* ${lead.dimensions}\n`;
         if (lead?.location) report += `📍 *אזור:* ${lead.location}\n`;
-        
-        report += `\n💬 *תמליל השיחה האחרונה:*\n`;
 
-        history.slice(-8).forEach((msg, i) => {
-            const label = msg.role === 'user' ? '👤 לקוח' : '🪚 איאן';
-            const clean = msg.text.replace(/[*_`]/g, '');
-            const t = clean.length > 120 ? clean.substring(0, 120) + '...' : clean;
-            report += `${i + 1}. ${label}: ${t}\n`;
-        });
+        if (reason === 'urgent' && userMessageSnippet) {
+            const cleanSnippet = userMessageSnippet.replace(/[*_`]/g, '').trim();
+            report += `\n💬 *הודעת הלקוח:* "${cleanSnippet.length > 180 ? cleanSnippet.substring(0, 180) + '...' : cleanSnippet}"\n`;
+        } else if (lead?.notes) {
+            const cleanNotes = lead.notes.replace(/[*_`]/g, '').trim();
+            if (cleanNotes.length > 0 && cleanNotes !== lead.project_type) {
+                report += `📝 *פרטים:* ${cleanNotes.length > 120 ? cleanNotes.substring(0, 120) + '...' : cleanNotes}\n`;
+            }
+        }
 
-        report += `\n🕐 ${new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}`;
+        report += `\n👉 [לחץ כאן לפתיחת השיחה בוואטסאפ](https://wa.me/${phone})\n`;
+        report += `🕐 ${new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}`;
 
         await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
             method: 'POST',
@@ -545,8 +572,10 @@ async function sendLeadReport(phone: string, customerName: string, lead: LeadPro
                 chat_id: ADMIN_GROUP_ID,
                 text: report,
                 parse_mode: 'Markdown',
+                disable_web_page_preview: true,
             }),
         });
+        console.log(`[Telegram Lead Alert] Successfully sent (${reason}) for ${phone}`);
     } catch (err) {
         console.error('[Telegram Lead Alert] Error:', err);
     }
@@ -682,9 +711,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
                     const aiResponse = await generateIanResponse(history, userText, leadProfile, customerName, mediaAttachment);
                     console.log(`[WhatsApp Reply] To ${customerPhone}: "${aiResponse}"`);
 
-                    // Check if AI generated a mockup prompt tag [GENERATE_MOCKUP: ...]
+                    // Check if AI generated a mockup prompt tag [GENERATE_MOCKUP: ...] or lead completed tag [LEAD_COMPLETED]
                     const mockupMatch = aiResponse.match(/\[GENERATE_MOCKUP:\s*([^\]]+)\]/i);
-                    const cleanResponseText = aiResponse.replace(/\[GENERATE_MOCKUP:\s*[^\]]+\]/gi, '').trim();
+                    const isLeadCompleted = /\[LEAD_COMPLETED\]/i.test(aiResponse) || /(העברתי את כל הפרטים|העברתי את הפרטים לצוות|ניצור איתך קשר (כאן )?בהקדם)/.test(aiResponse);
+                    const isUrgent = isUrgentContactRequest(userText);
+
+                    const cleanResponseText = aiResponse
+                        .replace(/\[GENERATE_MOCKUP:\s*[^\]]+\]/gi, '')
+                        .replace(/\[LEAD_COMPLETED\]/gi, '')
+                        .trim();
 
                     // 1. Send outbound WhatsApp reply (Mockup Image + Text) IMMEDIATELY
                     if (effectivePhoneId) {
@@ -712,16 +747,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
                         console.error('[WhatsApp] Missing phone number ID for outbound reply');
                     }
 
-                    // 2. Persist messages, update structured memory in DB, and send telegram report in parallel
+                    // 2. Persist messages, update structured memory in DB, and send Telegram alert if completed or urgent
                     const savedText = cleanResponseText || aiResponse;
                     const postTasks: Promise<any>[] = [
                         saveMessage(customerPhone, 'user', userText),
                         saveMessage(customerPhone, 'model', savedText),
                         updateLeadMemory(customerPhone, customerName, userText, savedText, leadProfile)
                     ];
-                    if (history.length >= 2 || userText.length > 20) {
-                        postTasks.push(sendLeadReport(customerPhone, customerName, leadProfile));
+
+                    if (isUrgent) {
+                        postTasks.push(sendLeadReport(customerPhone, customerName, leadProfile, 'urgent', userText));
+                    } else if (isLeadCompleted) {
+                        postTasks.push(sendLeadReport(customerPhone, customerName, leadProfile, 'completed'));
                     }
+
                     await Promise.allSettled(postTasks);
                 }
             }

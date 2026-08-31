@@ -111,7 +111,8 @@ const SYSTEM_INSTRUCTION = `# SYSTEM PROMPT: בוט נגריית איאן
 1. **שם מלא** (במידה וטרם נמסר).
 2. **עיר מגורים / אזור בארץ** (לצורך תיאום הגעה ומדידה).
 3. **מספר טלפון ליצירת קשר** (רק אם לא ידוע).
-- חתום במסר חם ומזמין: *"תודה רבה! העברתי את כל הפרטים לצוות המקצועי של נגריית איאן, ואנחנו ניצור איתך קשר בהקדם להמשך תכנון והצעת מחיר מדויקת."*`;
+- כאשר נמסרו הפרטים הדרושים (או שהלקוח מבקש שנציג ייצור איתו קשר), חתום במסר חם ומזמין והוסף בסוף תשובתך את התגית [LEAD_COMPLETED]:
+  *"תודה רבה! העברתי את כל הפרטים לצוות המקצועי של נגריית איאן, ואנחנו ניצור איתך קשר בהקדם להמשך תכנון והצעת מחיר מדויקת. [LEAD_COMPLETED]"*`;
 
 // --- Session Management ---
 
@@ -213,25 +214,25 @@ async function handleUserMessage(userId: number, firstName: string, username: st
 }
 
 /**
- * Send lead report WITHOUT deleting conversation history
+ * Send concise lead report
  */
-async function sendLeadReport(userId: number, chatId: number, firstName: string, username?: string): Promise<void> {
+async function sendLeadReport(userId: number, chatId: number, firstName: string, username?: string, isUrgent?: boolean, userSnippet?: string): Promise<void> {
     try {
-        const session = await kv.get<UserSession>(sessionKey(userId));
         const history = await loadHistory(chatId);
-        const messages = session?.messages_history || history.map(h => `${h.role === 'user' ? 'לקוח' : 'נגר'}: ${h.text}`);
+        const messages = history.map(h => `${h.role === 'user' ? 'לקוח' : 'נגר'}: ${h.text}`);
         const detectedPhone = extractPhoneFromMessages(messages);
-        const userLabel = (session?.username || username) ? `@${session?.username || username}` : (firstName || 'לקוח');
+        const userLabel = username ? `@${username}` : (firstName || 'לקוח');
 
-        let report = `🪚 *ליד חדש — נגריית איאן*\n\n`;
-        report += `👤 *שם:* ${session?.first_name || firstName || 'לא צוין'}\n`;
+        let report = isUrgent
+            ? `🚨 *דחוף: לקוח מבקש שיצרו איתו קשר בהקדם! (טלגרם)* 🚨\n\n`
+            : `🪚 *ליד חדש — נגריית איאן (טלגרם)* ✅\n\n`;
+
+        report += `👤 *שם:* ${firstName || 'לא צוין'}\n`;
         report += `📱 *יוזר:* ${userLabel}\n`;
         if (detectedPhone) report += `📞 *טלפון:* \`${detectedPhone}\` 🎯\n`;
-        report += `\n💬 *תמליל:*\n`;
-        messages.slice(-10).forEach((msg, i) => {
-            const t = msg.length > 150 ? msg.substring(0, 150) + '...' : msg;
-            report += `${i + 1}. ${t}\n`;
-        });
+        if (isUrgent && userSnippet) {
+            report += `\n💬 *הודעה:* "${userSnippet.replace(/[*_`]/g, '')}"\n`;
+        }
         report += `\n🕐 ${new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}`;
 
         await sendTelegramMessage(ADMIN_GROUP_ID, report);
@@ -507,7 +508,13 @@ export default async function handler(
         const aiResponse = await callGemini(history, userText);
 
         const mockupMatch = aiResponse.match(/\[GENERATE_MOCKUP:\s*([^\]]+)\]/i);
-        const cleanResponseText = aiResponse.replace(/\[GENERATE_MOCKUP:\s*[^\]]+\]/gi, '').trim();
+        const isLeadCompleted = /\[LEAD_COMPLETED\]/i.test(aiResponse) || /(העברתי את כל הפרטים|העברתי את הפרטים לצוות|ניצור איתך קשר בהקדם)/.test(aiResponse);
+        const isUrgent = /(דחוף|בהקדם|תתקשרו אלי|תחזרו אלי|שיחזרו אלי|צרו איתי קשר|לחוץ)/i.test(userText);
+
+        const cleanResponseText = aiResponse
+            .replace(/\[GENERATE_MOCKUP:\s*[^\]]+\]/gi, '')
+            .replace(/\[LEAD_COMPLETED\]/gi, '')
+            .trim();
 
         if (mockupMatch) {
             const imagePrompt = mockupMatch[1].trim();
@@ -523,6 +530,12 @@ export default async function handler(
 
         if (cleanResponseText) {
             await sendTelegramMessage(chatId, cleanResponseText);
+        }
+
+        if (isUrgent) {
+            sendLeadReport(userId, chatId, firstName, username, true, userText).catch(console.error);
+        } else if (isLeadCompleted) {
+            sendLeadReport(userId, chatId, firstName, username, false).catch(console.error);
         }
 
         res.status(200).json({ ok: true });
