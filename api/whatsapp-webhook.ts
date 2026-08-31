@@ -144,10 +144,11 @@ const BASE_SYSTEM_INSTRUCTION = `# SYSTEM PROMPT: בוט נגריית איאן
      [GENERATE_MOCKUP: An ultra-photorealistic luxury modern bespoke carpentry design of <פרטי הרהיט שנאספו: סוג הרהיט, חומרים, גוונים, ידיות, תאורת לד>, high-end architectural interior photography, elegant finish, bespoke woodwork, architectural digest, 8k resolution, photorealistic studio lighting]
 
 ### שלב ה': סגירת פנייה וליד
-לאחר האפיון (וההדמיה), בקש בנימוס:
-1. **עיר מגורים** (לצורך תיאום הגעה/מדידה).
-2. **מספר טלפון ליצירת קשר**.
-- חתום במסר חם ומזמין: *"תודה רבה! העברתי את כל הפרטים לצוות המקצועי של נגריית איאן, ואנחנו ניצור איתך קשר בהקדם להמשך תכנון והצעת מחיר מדויקת."*`;
+לאחר האפיון (וההדמיה), כדי שנוכל להעביר את הפנייה לצוות המקצועי:
+1. **שם מלא** (במידה וטרם נמסר).
+2. **עיר מגורים / אזור בארץ** (לצורך תיאום הגעה ומדידה).
+⚠️ **איסור מוחלט:** מספר הטלפון של הלקוח כבר ידוע למערכת מתוך הצ'אט בוואטסאפ. **חל איסור מוחלט לבקש מספר טלפון!**
+- חתום במסר חם ומזמין: *"תודה רבה! העברתי את כל הפרטים לצוות המקצועי של נגריית איאן, ואנחנו ניצור איתך קשר כאן במספר הזה בהקדם להמשך תכנון והצעת מחיר מדויקת."*`;
 
 function buildDynamicSystemInstruction(lead: LeadProfile | null, customerName: string): string {
     const facts: string[] = [];
