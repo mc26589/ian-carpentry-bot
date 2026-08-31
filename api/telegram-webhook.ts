@@ -439,11 +439,22 @@ async function sendTelegramMessage(chatId: number, text: string, replyToMessageI
 
 // --- WhatsApp Outbound Messaging Helper (from Admin Task Execution) ---
 
+function formatIsraeliPhoneDisplay(phoneStr: string): string {
+    const clean = phoneStr.replace(/\D/g, '');
+    if (clean.startsWith('972') && clean.length === 12) {
+        return `+${clean.slice(0, 3)}-${clean.slice(3, 5)}-${clean.slice(5, 8)}-${clean.slice(8)}`;
+    }
+    if (clean.startsWith('0') && clean.length === 10) {
+        return `${clean.slice(0, 3)}-${clean.slice(3, 6)}-${clean.slice(6)}`;
+    }
+    return phoneStr;
+}
+
 async function sendWhatsAppMessageFromAdmin(toPhone: string, text: string): Promise<{ success: boolean; error?: string; formattedPhone: string }> {
     const token = process.env.WHATSAPP_ACCESS_TOKEN || WHATSAPP_ACCESS_TOKEN;
     const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID || WHATSAPP_PHONE_NUMBER_ID;
 
-    // Strict phone number normalization for Meta Graph API
+    // Strict phone number normalization
     let clean = toPhone.replace(/\D/g, '');
     if (clean.startsWith('9720')) {
         clean = '972' + clean.slice(4);
@@ -453,74 +464,85 @@ async function sendWhatsAppMessageFromAdmin(toPhone: string, text: string): Prom
         clean = '972' + clean;
     }
 
+    const displayPhone = formatIsraeliPhoneDisplay(clean);
+
     if (!token || !phoneId) {
         console.error('[WhatsApp Outbound] Missing credentials in environment:', { hasToken: !!token, hasPhoneId: !!phoneId });
         return {
             success: false,
             error: 'משתני הסביבה של וואטסאפ (WHATSAPP_ACCESS_TOKEN או WHATSAPP_PHONE_NUMBER_ID) חסרים בשרת.',
-            formattedPhone: clean || toPhone
+            formattedPhone: displayPhone
         };
     }
 
-    try {
-        const url = `${WA_API_BASE}/${phoneId}/messages`;
-        const res = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`,
-            },
-            body: JSON.stringify({
-                messaging_product: 'whatsapp',
-                recipient_type: 'individual',
-                to: clean,
-                type: 'text',
-                text: { preview_url: false, body: text },
-            }),
-        });
+    // Try standard Meta format first (972...), then with '+' (+972...) if needed
+    const candidateFormats = [clean, `+${clean}`];
+    let lastError = '';
 
-        const resData: any = await res.json().catch(() => null);
+    for (const targetTo of candidateFormats) {
+        try {
+            const url = `${WA_API_BASE}/${phoneId}/messages`;
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    messaging_product: 'whatsapp',
+                    recipient_type: 'individual',
+                    to: targetTo,
+                    type: 'text',
+                    text: { preview_url: false, body: text },
+                }),
+            });
 
-        if (!res.ok) {
-            console.error(`[WhatsApp Outbound] Meta API error (${res.status}):`, JSON.stringify(resData));
+            const resData: any = await res.json().catch(() => null);
+
+            if (res.ok) {
+                // Persist message in Supabase so the customer's chat history remains seamless
+                if (supabase) {
+                    await supabase.from('carpentry_messages').insert({
+                        phone: clean,
+                        role: 'model',
+                        content: text,
+                    });
+                    await supabase.from('carpentry_leads').update({
+                        updated_at: new Date().toISOString(),
+                        notes: `נשלחה הודעת מנהל: "${text.length > 80 ? text.substring(0, 80) + '...' : text}"`
+                    }).eq('phone', clean);
+                }
+
+                console.log(`[WhatsApp Outbound] Successfully sent message to ${targetTo}`);
+                return { success: true, formattedPhone: displayPhone };
+            }
+
+            console.error(`[WhatsApp Outbound] Meta API error for format ${targetTo} (${res.status}):`, JSON.stringify(resData));
             const metaErrMsg = resData?.error?.message || `HTTP ${res.status}`;
             const metaErrCode = resData?.error?.code;
 
-            let humanExplanation = metaErrMsg;
             if (metaErrCode === 131047 || metaErrMsg.includes('24 hours')) {
-                humanExplanation = 'חלון 24 השעות של Meta נסגר עבור לקוח זה (עברו יותר מ-24 שעות מאז שהלקוח שלח הודעה לאחרונה). במצב כזה Meta מאפשרת רק שיחה ישירה או שליחת תבנית מאושרת.';
+                lastError = 'חלון 24 השעות של Meta נסגר עבור לקוח זה (עברו יותר מ-24 שעות מאז שהלקוח שלח הודעה לאחרונה). במצב כזה Meta מאפשרת רק שיחה ישירה או שליחת תבנית מאושרת.';
+                break;
+            } else if (metaErrCode === 131005 || metaErrMsg.includes('Access denied')) {
+                lastError = `(#131005) Access denied: המספר ${displayPhone} טרם אושר בפורטל Meta Developer תחת רשימת הנמענים (To / Allowed Recipients), או שהאפליקציה ב-Development Mode.`;
             } else if (metaErrCode === 190 || metaErrMsg.includes('Session')) {
-                humanExplanation = 'טוקן הגישה של Meta (WhatsApp Access Token) פג תוקף ויש לרעננו.';
-            } else if (metaErrCode === 100 || metaErrMsg.includes('phone')) {
-                humanExplanation = `מספר הטלפון (${clean}) אינו תקין או שאינו רשום בוואטסאפ.`;
+                lastError = 'טוקן הגישה של Meta (WhatsApp Access Token) פג תוקף ויש לרעננו.';
+                break;
+            } else {
+                lastError = `${metaErrMsg} ${metaErrCode ? `(קוד ${metaErrCode})` : ''}`;
             }
-
-            return {
-                success: false,
-                error: humanExplanation,
-                formattedPhone: clean
-            };
+        } catch (err: any) {
+            console.error(`[WhatsApp Outbound] Exception with ${targetTo}:`, err);
+            lastError = err?.message || 'שגיאת רשת בלתי צפויה';
         }
-
-        // Persist message in Supabase so the customer's chat history remains seamless
-        if (supabase) {
-            await supabase.from('carpentry_messages').insert({
-                phone: clean,
-                role: 'model',
-                content: text,
-            });
-            await supabase.from('carpentry_leads').update({
-                updated_at: new Date().toISOString(),
-                notes: `נשלחה הודעת מנהל: "${text.length > 80 ? text.substring(0, 80) + '...' : text}"`
-            }).eq('phone', clean);
-        }
-
-        console.log(`[WhatsApp Outbound] Successfully sent message to ${clean}`);
-        return { success: true, formattedPhone: clean };
-    } catch (err: any) {
-        console.error('[WhatsApp Outbound] Exception:', err);
-        return { success: false, error: err?.message || 'שגיאת רשת בלתי צפויה', formattedPhone: clean };
     }
+
+    return {
+        success: false,
+        error: lastError,
+        formattedPhone: displayPhone
+    };
 }
 
 // --- Admin Group Copilot & Lead Intelligence Assistant ---
