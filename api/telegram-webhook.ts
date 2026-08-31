@@ -439,57 +439,87 @@ async function sendTelegramMessage(chatId: number, text: string, replyToMessageI
 
 // --- WhatsApp Outbound Messaging Helper (from Admin Task Execution) ---
 
-async function sendWhatsAppMessageFromAdmin(toPhone: string, text: string): Promise<boolean> {
-    if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
-        console.error('[WhatsApp Outbound] Missing credentials in environment');
-        return false;
+async function sendWhatsAppMessageFromAdmin(toPhone: string, text: string): Promise<{ success: boolean; error?: string; formattedPhone: string }> {
+    const token = process.env.WHATSAPP_ACCESS_TOKEN || WHATSAPP_ACCESS_TOKEN;
+    const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID || WHATSAPP_PHONE_NUMBER_ID;
+
+    // Strict phone number normalization for Meta Graph API
+    let clean = toPhone.replace(/\D/g, '');
+    if (clean.startsWith('9720')) {
+        clean = '972' + clean.slice(4);
+    } else if (clean.startsWith('0')) {
+        clean = '972' + clean.slice(1);
+    } else if (!clean.startsWith('972') && clean.length === 9) {
+        clean = '972' + clean;
     }
 
-    let formattedPhone = toPhone.replace(/\D/g, '');
-    if (formattedPhone.startsWith('0')) {
-        formattedPhone = '972' + formattedPhone.slice(1);
+    if (!token || !phoneId) {
+        console.error('[WhatsApp Outbound] Missing credentials in environment:', { hasToken: !!token, hasPhoneId: !!phoneId });
+        return {
+            success: false,
+            error: 'משתני הסביבה של וואטסאפ (WHATSAPP_ACCESS_TOKEN או WHATSAPP_PHONE_NUMBER_ID) חסרים בשרת.',
+            formattedPhone: clean || toPhone
+        };
     }
 
     try {
-        const res = await fetch(`${WA_API_BASE}/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+        const url = `${WA_API_BASE}/${phoneId}/messages`;
+        const res = await fetch(url, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+                'Authorization': `Bearer ${token}`,
             },
             body: JSON.stringify({
                 messaging_product: 'whatsapp',
                 recipient_type: 'individual',
-                to: formattedPhone,
+                to: clean,
                 type: 'text',
                 text: { preview_url: false, body: text },
             }),
         });
 
+        const resData: any = await res.json().catch(() => null);
+
         if (!res.ok) {
-            const errData = await res.text();
-            console.error(`[WhatsApp Outbound] Failed (${res.status}):`, errData);
-            return false;
+            console.error(`[WhatsApp Outbound] Meta API error (${res.status}):`, JSON.stringify(resData));
+            const metaErrMsg = resData?.error?.message || `HTTP ${res.status}`;
+            const metaErrCode = resData?.error?.code;
+
+            let humanExplanation = metaErrMsg;
+            if (metaErrCode === 131047 || metaErrMsg.includes('24 hours')) {
+                humanExplanation = 'חלון 24 השעות של Meta נסגר עבור לקוח זה (עברו יותר מ-24 שעות מאז שהלקוח שלח הודעה לאחרונה). במצב כזה Meta מאפשרת רק שיחה ישירה או שליחת תבנית מאושרת.';
+            } else if (metaErrCode === 190 || metaErrMsg.includes('Session')) {
+                humanExplanation = 'טוקן הגישה של Meta (WhatsApp Access Token) פג תוקף ויש לרעננו.';
+            } else if (metaErrCode === 100 || metaErrMsg.includes('phone')) {
+                humanExplanation = `מספר הטלפון (${clean}) אינו תקין או שאינו רשום בוואטסאפ.`;
+            }
+
+            return {
+                success: false,
+                error: humanExplanation,
+                formattedPhone: clean
+            };
         }
 
         // Persist message in Supabase so the customer's chat history remains seamless
         if (supabase) {
             await supabase.from('carpentry_messages').insert({
-                phone: formattedPhone,
+                phone: clean,
                 role: 'model',
                 content: text,
             });
             await supabase.from('carpentry_leads').update({
                 updated_at: new Date().toISOString(),
                 notes: `נשלחה הודעת מנהל: "${text.length > 80 ? text.substring(0, 80) + '...' : text}"`
-            }).eq('phone', formattedPhone);
+            }).eq('phone', clean);
         }
 
-        console.log(`[WhatsApp Outbound] Successfully sent message to ${formattedPhone}`);
-        return true;
-    } catch (err) {
+        console.log(`[WhatsApp Outbound] Successfully sent message to ${clean}`);
+        return { success: true, formattedPhone: clean };
+    } catch (err: any) {
         console.error('[WhatsApp Outbound] Exception:', err);
-        return false;
+        return { success: false, error: err?.message || 'שגיאת רשת בלתי צפויה', formattedPhone: clean };
     }
 }
 
@@ -656,14 +686,14 @@ ${leadContext || 'לא נמצאו נתוני לקוח ספציפיים.'}
 
             if (effectivePhone) {
                 console.log(`[Admin Action] Sending WhatsApp to ${effectivePhone}: "${messageToSend}"`);
-                const sent = await sendWhatsAppMessageFromAdmin(effectivePhone, messageToSend);
-                if (sent) {
-                    executionResultNote = `\n\n✅ *ההודעה נשלחה בהצלחה ללקוח בוואטסאפ!* 📲\n💬 *" ${messageToSend} "*`;
+                const result = await sendWhatsAppMessageFromAdmin(effectivePhone, messageToSend);
+                if (result.success) {
+                    executionResultNote = `\n\n✅ *ההודעה נשלחה בהצלחה ללקוח בוואטסאפ (${result.formattedPhone})!* 📲\n💬 *" ${messageToSend} "*`;
                 } else {
-                    executionResultNote = `\n\n⚠️ *ניסיתי לשלוח את ההודעה בוואטסאפ אך חלה שגיאה בתקשורת מול Meta.*`;
+                    executionResultNote = `\n\n⚠️ *לא הצלחתי לשלוח את ההודעה ללקוח (${result.formattedPhone}) בוואטסאפ:*\n${result.error}`;
                 }
             } else {
-                executionResultNote = `\n\n⚠️ *לא זוהה מספר טלפון לשליחת ההודעה בוואטסאפ.*`;
+                executionResultNote = `\n\n⚠️ *לא זוהה מספר טלפון של הלקוח לשליחת ההודעה בוואטסאפ.*`;
             }
         }
 
