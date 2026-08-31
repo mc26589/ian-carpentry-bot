@@ -1,11 +1,14 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { kv } from '@vercel/kv';
+import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI } from '@google/genai';
 
 // --- Environment Variables ---
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
 const ADMIN_GROUP_ID = parseInt(process.env.ADMIN_GROUP_ID || '0', 10);
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 
 // --- Constants ---
 const GEMINI_MODEL = 'gemini-3.5-flash-lite';
@@ -13,6 +16,9 @@ const MAX_HISTORY_MESSAGES = 20;
 const HISTORY_TTL_SECONDS = 86400; // 24 hours — so customers can resume conversations
 const TG_MAX_LENGTH = 4096;
 const ACTIVE_USERS_KEY = 'active_bot_users';
+
+// --- Supabase Client (for cross-platform WhatsApp lead queries) ---
+const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
 // --- Types ---
 
@@ -31,23 +37,40 @@ interface ChatMessage {
     text: string;
 }
 
+interface TelegramReplyMessage {
+    message_id: number;
+    text?: string;
+    caption?: string;
+    from?: {
+        id: number;
+        first_name: string;
+        is_bot?: boolean;
+        username?: string;
+    };
+}
+
+interface TelegramMessage {
+    message_id: number;
+    from: {
+        id: number;
+        first_name: string;
+        last_name?: string;
+        username?: string;
+        is_bot?: boolean;
+    };
+    chat: {
+        id: number;
+        type: string;
+        title?: string;
+    };
+    date: number;
+    text?: string;
+    reply_to_message?: TelegramReplyMessage;
+}
+
 interface TelegramUpdate {
     update_id: number;
-    message?: {
-        message_id: number;
-        from: {
-            id: number;
-            first_name: string;
-            last_name?: string;
-            username?: string;
-        };
-        chat: {
-            id: number;
-            type: string;
-        };
-        date: number;
-        text?: string;
-    };
+    message?: TelegramMessage;
 }
 
 // --- System Instructions (Authentic Hebrew Carpenter Persona) ---
@@ -345,7 +368,7 @@ async function callGemini(history: ChatMessage[], userMessage: string): Promise<
 
 // --- Telegram API Helpers ---
 
-async function sendTelegramMessage(chatId: number, text: string): Promise<void> {
+async function sendTelegramMessage(chatId: number, text: string, replyToMessageId?: number): Promise<void> {
     const chunks: string[] = [];
     let remaining = text;
 
@@ -362,7 +385,10 @@ async function sendTelegramMessage(chatId: number, text: string): Promise<void> 
         remaining = remaining.substring(breakPoint).trimStart();
     }
 
-    for (const chunk of chunks) {
+    for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        // Only attach reply_to_message_id to the first chunk
+        const replyParam = (i === 0 && replyToMessageId) ? replyToMessageId : undefined;
         try {
             const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
             const res = await fetch(url, {
@@ -372,6 +398,7 @@ async function sendTelegramMessage(chatId: number, text: string): Promise<void> 
                     chat_id: chatId,
                     text: chunk,
                     parse_mode: 'Markdown',
+                    reply_to_message_id: replyParam,
                 }),
             });
 
@@ -386,6 +413,7 @@ async function sendTelegramMessage(chatId: number, text: string): Promise<void> 
                         body: JSON.stringify({
                             chat_id: chatId,
                             text: chunk,
+                            reply_to_message_id: replyParam,
                         }),
                     });
                 }
@@ -393,6 +421,157 @@ async function sendTelegramMessage(chatId: number, text: string): Promise<void> 
         } catch (error) {
             console.error('[Telegram] sendMessage exception:', error);
         }
+    }
+}
+
+// --- Admin Group Copilot & Lead Intelligence Assistant ---
+
+async function handleAdminGroupQuestion(
+    chatId: number,
+    messageId: number,
+    adminText: string,
+    replyToMessage?: TelegramReplyMessage,
+    senderName?: string
+): Promise<void> {
+    await sendTelegramTypingAction(chatId);
+
+    // 1. Extract context from reply_to_message or admin query
+    const replyText = replyToMessage?.text || replyToMessage?.caption || '';
+    const combinedSearchText = `${adminText}\n${replyText}`;
+
+    // Extract phone if present
+    const phoneMatch = combinedSearchText.match(/(?:05\d[-\s]?\d{7}|0[23489][-\s]?\d{7}|\+972[-\s]?\d{1,2}[-\s]?\d{7}|\b\d{9,10}\b)/);
+    const targetPhone = phoneMatch ? phoneMatch[0].replace(/[-\s]/g, '') : null;
+
+    // Extract Telegram User ID if present (e.g. `🆔 User ID: 12345678`)
+    const userIdMatch = replyText.match(/User ID:\s*`?(\d+)`?/i);
+    const targetUserId = userIdMatch ? parseInt(userIdMatch[1], 10) : null;
+
+    let leadData: any = null;
+    let messagesHistory: { role: string; text: string }[] = [];
+
+    // 2. Query Supabase for WhatsApp leads
+    if (supabase) {
+        try {
+            if (targetPhone) {
+                // Fetch lead by phone
+                const { data: lead } = await supabase
+                    .from('carpentry_leads')
+                    .select('*')
+                    .or(`phone.eq.${targetPhone},phone.eq.972${targetPhone.replace(/^0/, '')},phone.eq.0${targetPhone.replace(/^972/, '')}`)
+                    .maybeSingle();
+                leadData = lead;
+
+                // Fetch recent messages
+                const { data: msgs } = await supabase
+                    .from('carpentry_messages')
+                    .select('role, content, created_at')
+                    .or(`phone.eq.${targetPhone},phone.eq.972${targetPhone.replace(/^0/, '')},phone.eq.0${targetPhone.replace(/^972/, '')}`)
+                    .order('created_at', { ascending: false })
+                    .limit(25);
+
+                if (msgs && msgs.length > 0) {
+                    messagesHistory = msgs.reverse().map(m => ({
+                        role: m.role === 'user' ? 'לקוח' : 'נגר (בוט)',
+                        text: m.content
+                    }));
+                }
+            } else {
+                // If no specific phone, fetch the most recently updated lead from Supabase
+                const { data: recentLeads } = await supabase
+                    .from('carpentry_leads')
+                    .select('*')
+                    .order('updated_at', { ascending: false })
+                    .limit(1);
+
+                if (recentLeads && recentLeads.length > 0) {
+                    leadData = recentLeads[0];
+                    const { data: msgs } = await supabase
+                        .from('carpentry_messages')
+                        .select('role, content, created_at')
+                        .eq('phone', leadData.phone)
+                        .order('created_at', { ascending: false })
+                        .limit(25);
+
+                    if (msgs && msgs.length > 0) {
+                        messagesHistory = msgs.reverse().map(m => ({
+                            role: m.role === 'user' ? 'לקוח' : 'נגר (בוט)',
+                            text: m.content
+                        }));
+                    }
+                }
+            }
+        } catch (dbErr) {
+            console.error('[Admin Query] Supabase error:', dbErr);
+        }
+    }
+
+    // 3. If Telegram lead history exists in KV
+    if (targetUserId && messagesHistory.length === 0) {
+        const hist = await loadHistory(targetUserId);
+        if (hist.length > 0) {
+            messagesHistory = hist.map(h => ({
+                role: h.role === 'user' ? 'לקוח' : 'נגר (בוט)',
+                text: h.text
+            }));
+        }
+    }
+
+    // 4. Build Context for Gemini
+    let leadContext = '';
+    if (leadData) {
+        leadContext += `\n📋 נתוני הליד מתוך ה-Database:\n`;
+        leadContext += `• שם הלקוח: ${leadData.customer_name || 'לא צוין'}\n`;
+        leadContext += `• טלפון: ${leadData.phone}\n`;
+        leadContext += `• פלטפורמה: ${leadData.platform || 'whatsapp'}\n`;
+        if (leadData.project_type) leadContext += `• סוג פרויקט: ${leadData.project_type}\n`;
+        if (leadData.dimensions) leadContext += `• מידות: ${leadData.dimensions}\n`;
+        if (leadData.location) leadContext += `• אזור בארץ: ${leadData.location}\n`;
+        if (leadData.notes) leadContext += `• הערות ודרישות: ${leadData.notes}\n`;
+        if (leadData.conversation_summary) leadContext += `• תקציר שיחה: ${leadData.conversation_summary}\n`;
+        if (leadData.updated_at) leadContext += `• עדכון אחרון: ${new Date(leadData.updated_at).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}\n`;
+    }
+
+    if (replyText) {
+        leadContext += `\n💬 הודעת הליד / ההתראה שהמנהל הגיב אליה:\n"""\n${replyText}\n"""\n`;
+    }
+
+    if (messagesHistory.length > 0) {
+        leadContext += `\n📜 תמליל השיחה המלאה עם הלקוח:\n`;
+        messagesHistory.forEach((m, idx) => {
+            leadContext += `${idx + 1}. [${m.role}]: ${m.text}\n`;
+        });
+    }
+
+    const adminSystemPrompt = `אתה העוזר הניהולי המקצועי והחכם של "נגריית איאן" בקבוצת המנהלים בטלגרם.
+המנהלים/הנגרים שואלים אותך שאלות על לידים, לקוחות, שיחות שנוהלו, הצעות מחיר, חומרים ומפרטים.
+
+תפקידך:
+1. ענה ישירות, במקצועיות, בבהירות ובדיוק על שאלת המנהל (${senderName || 'המנהל'}).
+2. הסתמך במדויק על נתוני הליד ותמליל השיחה המצורפים.
+3. אם המנהל שואל שאלות מקצועיות/טכניות (כגון מחירי מטר רץ, קטלוגים של פורמקס/בלורן/חג סחר, גווני טמבור/נירלט, מגירות בלום או דומיסיל), ספק מידע מקצועי מדויק ממאגר הידע של הנגרייה.
+4. אם חסר פרט מסוים בשיחה (למשל הלקוח עוד לא החליט על גוון או לא מסר מידה סופית), ציין זאת ביושר.
+
+נתוני הרקע והשיחה:
+${leadContext || 'לא נמצאו נתוני לקוח ספציפיים.'}
+`;
+
+    try {
+        const response = await aiClient.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: [{ role: 'user', parts: [{ text: adminText }] }],
+            config: {
+                temperature: 0.3,
+                maxOutputTokens: 500,
+                systemInstruction: adminSystemPrompt,
+            }
+        });
+
+        const reply = response.text?.trim() || 'לא הצלחתי לנתח את הנתונים כרגע.';
+        await sendTelegramMessage(chatId, reply, messageId);
+    } catch (err) {
+        console.error('[Admin Query] Gemini generation error:', err);
+        await sendTelegramMessage(chatId, 'אירעה שגיאה בעיבוד השאלה על הליד.', messageId);
     }
 }
 
@@ -480,6 +659,24 @@ export default async function handler(
         console.log(`[Telegram] Message from ${firstName} (${chatId}): ${userText}`);
 
         const isPrivateChat = chatType === 'private';
+        const isGroupChat = chatType === 'group' || chatType === 'supergroup' || chatId === ADMIN_GROUP_ID;
+
+        // --- Admin Group Assistant Flow ---
+        if (isGroupChat) {
+            const isReplyToBot = message.reply_to_message?.from?.is_bot === true || !!message.reply_to_message;
+            const isMentionOrQuestion = /@\w*bot\b/i.test(userText) || /(?:בוט|ליד|שאלה|תסכם|סכם|פרטים|כמה מטר|איזה צבע|מה הטלפון|מה הלקוח|מי הלקוח|מה הסטטוס|מה הוא רוצה|מה הוא ביקש|מה המידות|איזה חומר|כמה עולה|איזה עץ|הצעת מחיר)/i.test(userText);
+
+            if (isReplyToBot || isMentionOrQuestion || chatId === ADMIN_GROUP_ID) {
+                console.log(`[Admin Group Assistant] Query from ${firstName} in chat ${chatId}: "${userText}"`);
+                await handleAdminGroupQuestion(chatId, message.message_id, userText, message.reply_to_message, firstName);
+                res.status(200).json({ ok: true });
+                return;
+            }
+
+            // Casual group chatter not directed to the bot
+            res.status(200).json({ ok: true });
+            return;
+        }
 
         if (isPrivateChat && (userText === '/end' || userText === '/סיום')) {
             await endUserSession(userId, chatId, firstName, username);
