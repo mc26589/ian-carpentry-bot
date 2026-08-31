@@ -461,17 +461,64 @@ async function generateIanResponse(
 
 // --- Lead Reporting (Concise Telegram Alerts - Completed & Urgent Only) ---
 
+const reportedLeadsCache = new Map<string, { completedAt?: number; urgentAt?: number }>();
+
 function isUrgentContactRequest(text: string): boolean {
-    const urgentKeywords = [
-        'דחוף', 'דחופה', 'בדחיפות',
-        'בהקדם', 'בהקדם האפשרי',
-        'תתקשרו אלי', 'תתקשר אלי', 'תתקשרו', 'תתקשר',
-        'תחזרו אלי', 'שיחזרו אלי', 'לחזור אלי',
-        'שיצרו איתי קשר', 'ליצור איתי קשר', 'צרו איתי קשר', 'צור איתי קשר',
-        'רוצה לדבר עם נגר', 'רוצה לדבר עם מישהו', 'נציג אנושי', 'לדבר בטלפון',
-        'דברו איתי', 'מחכה לשיחה', 'לחוץ', 'לחוצה'
+    const trimmed = text.trim();
+    if (trimmed.length < 4) return false;
+
+    const urgentPatterns = [
+        /\b(?:דחוף|בדחיפות|בהקדם האפשרי)\b/i,
+        /(?:תתקשרו אלי|תתקשר אלי|תחזרו אלי דחוף|שיחזרו אלי דחוף|צרו איתי קשר דחוף)/i,
+        /(?:רוצה לדבר עם נגר|נציג אנושי|רוצה שיחה טלפונית|דברו איתי דחוף)/i
     ];
-    return urgentKeywords.some(kw => text.includes(kw));
+    return urgentPatterns.some(p => p.test(text));
+}
+
+async function shouldSendWhatsAppLeadReport(phone: string, reason: 'completed' | 'urgent'): Promise<boolean> {
+    const now = Date.now();
+    const cached = reportedLeadsCache.get(phone);
+
+    // 1. In-memory cooldown check
+    if (cached) {
+        if (reason === 'completed' && cached.completedAt && (now - cached.completedAt < 24 * 3600 * 1000)) {
+            console.log(`[Lead Filter] Suppressing duplicate completed alert for ${phone} (in-memory 24h cooldown)`);
+            return false;
+        }
+        if (reason === 'urgent' && cached.urgentAt && (now - cached.urgentAt < 2 * 3600 * 1000)) {
+            console.log(`[Lead Filter] Suppressing duplicate urgent alert for ${phone} (in-memory 2h cooldown)`);
+            return false;
+        }
+    }
+
+    // 2. Persistent Supabase check across serverless restarts
+    try {
+        const marker = reason === 'completed' ? '%[LEAD_REPORTED]%' : '%[URGENT_REPORTED]%';
+        const cooldownMs = reason === 'completed' ? 24 * 3600 * 1000 : 2 * 3600 * 1000;
+        const sinceTime = new Date(now - cooldownMs).toISOString();
+
+        const { data, error } = await supabase
+            .from('carpentry_messages')
+            .select('id')
+            .eq('phone', phone)
+            .eq('role', 'model')
+            .gte('created_at', sinceTime)
+            .ilike('content', marker)
+            .limit(1);
+
+        if (!error && data && data.length > 0) {
+            console.log(`[Lead Filter] Suppressing duplicate ${reason} alert for ${phone} (Supabase persistent cooldown)`);
+            const existing = reportedLeadsCache.get(phone) || {};
+            if (reason === 'completed') existing.completedAt = now;
+            if (reason === 'urgent') existing.urgentAt = now;
+            reportedLeadsCache.set(phone, existing);
+            return false;
+        }
+    } catch (err) {
+        console.error('[Lead Filter] Error checking past reports in DB:', err);
+    }
+
+    return true;
 }
 
 async function sendLeadReport(
@@ -480,13 +527,17 @@ async function sendLeadReport(
     lead: LeadProfile | null,
     reason: 'completed' | 'urgent',
     userMessageSnippet?: string
-): Promise<void> {
-    if (!ADMIN_GROUP_ID || !TELEGRAM_BOT_TOKEN) return;
+): Promise<boolean> {
+    if (!ADMIN_GROUP_ID || !TELEGRAM_BOT_TOKEN) return false;
+
+    // Check deduplication / cooldown
+    const shouldSend = await shouldSendWhatsAppLeadReport(phone, reason);
+    if (!shouldSend) return false;
 
     try {
         let report = '';
         if (reason === 'urgent') {
-            report += `🚨 *דחוף: לקוח מבקש שיצרו איתו קשר בהקדם!* 🚨\n\n`;
+            report += `🚨 *דחוף: לקוח מבקש שיצרו איתו קשר בהקדם! (וואטסאפ)* 🚨\n\n`;
         } else {
             report += `🪵 *ליד חדש וסגור מוואטסאפ — נגריית איאן* ✅\n\n`;
         }
@@ -520,9 +571,18 @@ async function sendLeadReport(
                 disable_web_page_preview: true,
             }),
         });
+
+        // Record in cache
+        const existing = reportedLeadsCache.get(phone) || {};
+        if (reason === 'completed') existing.completedAt = Date.now();
+        if (reason === 'urgent') existing.urgentAt = Date.now();
+        reportedLeadsCache.set(phone, existing);
+
         console.log(`[Telegram Lead Alert] Successfully sent (${reason}) for ${phone}`);
+        return true;
     } catch (err) {
         console.error('[Telegram Lead Alert] Error:', err);
+        return false;
     }
 }
 
@@ -658,7 +718,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
                     // Check if AI generated a mockup prompt tag [GENERATE_MOCKUP: ...] or lead completed tag [LEAD_COMPLETED]
                     const mockupMatch = aiResponse.match(/\[GENERATE_MOCKUP:\s*([^\]]+)\]/i);
-                    const isLeadCompleted = /\[LEAD_COMPLETED\]/i.test(aiResponse) || /(העברתי את כל הפרטים|העברתי את הפרטים לצוות|ניצור איתך קשר (כאן )?בהקדם)/.test(aiResponse);
+                    const isLeadCompleted = /\[LEAD_COMPLETED\]/i.test(aiResponse);
                     const isUrgent = isUrgentContactRequest(userText);
 
                     const cleanResponseText = aiResponse
@@ -711,14 +771,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
                     }
                     const postTasks: Promise<any>[] = [
                         saveMessage(customerPhone, 'user', userText),
-                        saveMessage(customerPhone, 'model', savedText),
                         updateLeadMemory(customerPhone, customerName, userText, savedText, leadProfile)
                     ];
 
                     if (isUrgent) {
-                        postTasks.push(sendLeadReport(customerPhone, customerName, leadProfile, 'urgent', userText));
+                        postTasks.push(
+                            sendLeadReport(customerPhone, customerName, leadProfile, 'urgent', userText).then(sent => {
+                                const marker = sent ? ' [URGENT_REPORTED]' : '';
+                                return saveMessage(customerPhone, 'model', savedText + marker);
+                            })
+                        );
                     } else if (isLeadCompleted) {
-                        postTasks.push(sendLeadReport(customerPhone, customerName, leadProfile, 'completed'));
+                        postTasks.push(
+                            sendLeadReport(customerPhone, customerName, leadProfile, 'completed').then(sent => {
+                                const marker = sent ? ' [LEAD_REPORTED]' : '';
+                                return saveMessage(customerPhone, 'model', savedText + marker);
+                            })
+                        );
+                    } else {
+                        postTasks.push(saveMessage(customerPhone, 'model', savedText));
                     }
 
                     await Promise.allSettled(postTasks);

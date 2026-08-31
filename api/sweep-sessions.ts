@@ -18,6 +18,8 @@ interface UserSession {
     username?: string;
     messages_history: string[];
     last_activity: number;
+    lead_reported?: boolean;
+    lead_reported_at?: number;
 }
 
 // --- Helpers ---
@@ -88,27 +90,43 @@ async function endUserSession(userId: number): Promise<void> {
     const session = await getSession(userId);
     if (!session) return;
 
-    const userLabel = session.username ? `@${session.username}` : session.first_name;
+    // 1. If already reported during chat, clean up quietly without duplicate alerts
+    if (session.lead_reported) {
+        console.log(`[Sweep] User ${userId} was already reported to admin. Ending session quietly.`);
+        await deleteSession(userId);
+        return;
+    }
 
-    let report = `🪚 *ליד חדש — נגריית איאן (סיום אוטומטי)*\n\n`;
-    report += `👤 *שם:* ${session.first_name}\n`;
-    report += `📱 *יוזר:* ${userLabel}\n`;
-    report += `🆔 *User ID:* \`${session.user_id}\`\n\n`;
-    report += `💬 *תמליל שיחה:*\n`;
+    // 2. Also check persistent KV cooldown key
+    const alreadyReportedInKV = await kv.get(`lead_reported_tg:${userId}`);
+    if (alreadyReportedInKV) {
+        console.log(`[Sweep] User ${userId} has persistent lead_reported_tg key. Ending session quietly.`);
+        await deleteSession(userId);
+        return;
+    }
 
-    if (session.messages_history.length === 0) {
-        report += `_אין הודעות_`;
-    } else {
+    // 3. Only send report if there are at least 2 messages (meaningful conversation, not casual ping)
+    if (session.messages_history.length >= 2) {
+        const userLabel = session.username ? `@${session.username}` : session.first_name;
+
+        let report = `🪚 *ליד חדש — נגריית איאן (סיום שיחה טלגרם)*\n\n`;
+        report += `👤 *שם:* ${session.first_name}\n`;
+        report += `📱 *יוזר:* ${userLabel}\n`;
+        report += `🆔 *User ID:* \`${session.user_id}\`\n\n`;
+        report += `💬 *תמליל שיחה:*\n`;
+
         session.messages_history.forEach((msg, index) => {
             const truncatedMsg = msg.length > 200 ? msg.substring(0, 200) + '...' : msg;
             report += `${index + 1}. ${truncatedMsg}\n`;
         });
+
+        report += `\n🕐 *זמן:* ${new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}`;
+
+        await sendTelegramMessage(ADMIN_GROUP_ID, report);
+        await kv.set(`lead_reported_tg:${userId}`, Date.now(), { ex: 86400 });
+        console.log(`[Sweep] Session ended for user ${userId}, report sent to admin`);
     }
 
-    report += `\n🕐 *זמן:* ${new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}`;
-
-    await sendTelegramMessage(ADMIN_GROUP_ID, report);
-    console.log(`[Sweep] Session ended for user ${userId}, report sent to admin`);
     await deleteSession(userId);
 }
 

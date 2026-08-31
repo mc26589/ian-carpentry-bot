@@ -22,6 +22,8 @@ interface UserSession {
     username?: string;
     messages_history: string[];
     last_activity: number;
+    lead_reported?: boolean;
+    lead_reported_at?: number;
 }
 
 interface ChatMessage {
@@ -85,46 +87,53 @@ function extractPhoneFromMessages(messages: string[]): string | null {
 }
 
 /**
- * End a user's session and send summary to admin group
+ * End a user's session and send summary to admin group ONLY IF NOT PREVIOUSLY REPORTED
  */
 async function endUserSession(userId: number, chatId?: number, firstName?: string, username?: string): Promise<void> {
     try {
         let session = await kv.get<UserSession>(sessionKey(userId));
-        let messages = session?.messages_history || [];
+        
+        // If this lead was already reported during the conversation, delete quietly without spamming
+        if (session?.lead_reported) {
+            console.log(`[Session] User ${userId} was already reported to admin. Ending session quietly.`);
+            await kv.del(sessionKey(userId));
+            await kv.srem(ACTIVE_USERS_KEY, userId.toString());
+            return;
+        }
 
+        let messages = session?.messages_history || [];
         if (messages.length === 0 && chatId) {
             const hist = await loadHistory(chatId);
             messages = hist.map(h => `${h.role === 'user' ? 'לקוח' : 'נגר'}: ${h.text}`);
         }
 
-        const userLabel = (session?.username || username)
-            ? `@${session?.username || username}`
-            : (session?.first_name || firstName || 'לקוח');
+        // Only send if there was meaningful interaction (more than 1 message)
+        if (messages.length >= 2) {
+            const userLabel = (session?.username || username)
+                ? `@${session?.username || username}`
+                : (session?.first_name || firstName || 'לקוח');
 
-        const detectedPhone = extractPhoneFromMessages(messages);
+            const detectedPhone = extractPhoneFromMessages(messages);
 
-        let report = `🪚 *ליד חדש — נגריית איאן*\n\n`;
-        report += `👤 *שם:* ${session?.first_name || firstName || 'לא צוין'}\n`;
-        report += `📱 *יוזר:* ${userLabel}\n`;
-        report += `🆔 *User ID:* \`${userId}\`\n`;
-        if (detectedPhone) {
-            report += `📞 *טלפון שנקלט:* \`${detectedPhone}\` 🎯\n`;
-        }
-        report += `\n💬 *תמליל השיחה:*\n`;
+            let report = `🪚 *ליד חדש — נגריית איאן (טלגרם)*\n\n`;
+            report += `👤 *שם:* ${session?.first_name || firstName || 'לא צוין'}\n`;
+            report += `📱 *יוזר:* ${userLabel}\n`;
+            report += `🆔 *User ID:* \`${userId}\`\n`;
+            if (detectedPhone) {
+                report += `📞 *טלפון שנקלט:* \`${detectedPhone}\` 🎯\n`;
+            }
+            report += `\n💬 *תמליל השיחה:*\n`;
 
-        if (messages.length === 0) {
-            report += `_אין הודעות זמינות_\n`;
-        } else {
             messages.forEach((msg, index) => {
                 const truncatedMsg = msg.length > 200 ? msg.substring(0, 200) + '...' : msg;
                 report += `${index + 1}. ${truncatedMsg}\n`;
             });
+
+            report += `\n🕐 *זמן:* ${new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}`;
+
+            await sendTelegramMessage(ADMIN_GROUP_ID, report);
+            console.log(`[Session] Lead report sent to admin group for user ${userId}`);
         }
-
-        report += `\n🕐 *זמן:* ${new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}`;
-
-        await sendTelegramMessage(ADMIN_GROUP_ID, report);
-        console.log(`[Session] Lead report sent to admin group for user ${userId}`);
 
         await kv.del(sessionKey(userId));
         await kv.srem(ACTIVE_USERS_KEY, userId.toString());
@@ -158,21 +167,50 @@ async function handleUserMessage(userId: number, firstName: string, username: st
 
         await kv.set(sessionKey(userId), session);
 
-        // Auto-detect phone number: send lead report immediately but DON'T delete history
+        // Auto-detect phone number: only send if lead has not been reported yet!
         const hasPhone = /(?:05\d[-\s]?\d{7}|0[23489][-\s]?\d{7}|\+972[-\s]?\d{1,2}[-\s]?\d{7})/.test(messageText);
-        if (hasPhone) {
+        if (hasPhone && !session.lead_reported) {
             console.log(`[Lead] Phone detected from user ${userId}, dispatching real-time lead report`);
-            sendLeadReport(userId, chatId, firstName, username).catch(console.error);
+            sendLeadReport(userId, chatId, firstName, username, false).catch(console.error);
         }
     } catch (error) {
         console.error('[KV] Error updating session:', error);
     }
 }
 
+async function shouldSendTelegramLeadReport(userId: number, isUrgent?: boolean): Promise<boolean> {
+    try {
+        const leadReportedKey = `lead_reported_tg:${userId}`;
+        const urgentReportedKey = `lead_urgent_tg:${userId}`;
+
+        if (isUrgent) {
+            const urgentRecentlySent = await kv.get<number>(urgentReportedKey);
+            if (urgentRecentlySent) {
+                console.log(`[Telegram Lead Filter] Suppressing duplicate urgent report for ${userId} (2h cooldown)`);
+                return false;
+            }
+        } else {
+            const alreadyReported = await kv.get<number>(leadReportedKey);
+            if (alreadyReported) {
+                console.log(`[Telegram Lead Filter] Suppressing duplicate lead report for ${userId} (24h cooldown)`);
+                return false;
+            }
+        }
+    } catch (err) {
+        console.error('[Telegram Lead Filter] Error checking KV:', err);
+    }
+    return true;
+}
+
 /**
- * Send concise lead report
+ * Send concise lead report with deduplication & cooldown
  */
-async function sendLeadReport(userId: number, chatId: number, firstName: string, username?: string, isUrgent?: boolean, userSnippet?: string): Promise<void> {
+async function sendLeadReport(userId: number, chatId: number, firstName: string, username?: string, isUrgent?: boolean, userSnippet?: string): Promise<boolean> {
+    if (!ADMIN_GROUP_ID || !TELEGRAM_BOT_TOKEN) return false;
+
+    const shouldSend = await shouldSendTelegramLeadReport(userId, isUrgent);
+    if (!shouldSend) return false;
+
     try {
         const history = await loadHistory(chatId);
         const messages = history.map(h => `${h.role === 'user' ? 'לקוח' : 'נגר'}: ${h.text}`);
@@ -181,7 +219,7 @@ async function sendLeadReport(userId: number, chatId: number, firstName: string,
 
         let report = isUrgent
             ? `🚨 *דחוף: לקוח מבקש שיצרו איתו קשר בהקדם! (טלגרם)* 🚨\n\n`
-            : `🪚 *ליד חדש — נגריית איאן (טלגרם)* ✅\n\n`;
+            : `🪚 *ליד חדש וסגור — נגריית איאן (טלגרם)* ✅\n\n`;
 
         report += `👤 *שם:* ${firstName || 'לא צוין'}\n`;
         report += `📱 *יוזר:* ${userLabel}\n`;
@@ -192,9 +230,27 @@ async function sendLeadReport(userId: number, chatId: number, firstName: string,
         report += `\n🕐 ${new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })}`;
 
         await sendTelegramMessage(ADMIN_GROUP_ID, report);
-        console.log(`[Lead] Report sent for user ${userId}`);
+
+        // Mark reported in KV with TTL
+        if (isUrgent) {
+            await kv.set(`lead_urgent_tg:${userId}`, Date.now(), { ex: 7200 }); // 2 hours
+        } else {
+            await kv.set(`lead_reported_tg:${userId}`, Date.now(), { ex: 86400 }); // 24 hours
+        }
+
+        // Mark reported in session
+        let session = await kv.get<UserSession>(sessionKey(userId));
+        if (session) {
+            session.lead_reported = true;
+            session.lead_reported_at = Date.now();
+            await kv.set(sessionKey(userId), session);
+        }
+
+        console.log(`[Telegram Lead] Report successfully sent for user ${userId} (${isUrgent ? 'urgent' : 'completed'})`);
+        return true;
     } catch (error) {
-        console.error('[Lead] Error sending report:', error);
+        console.error('[Telegram Lead] Error sending report:', error);
+        return false;
     }
 }
 
@@ -464,8 +520,8 @@ export default async function handler(
         const aiResponse = await callGemini(history, userText);
 
         const mockupMatch = aiResponse.match(/\[GENERATE_MOCKUP:\s*([^\]]+)\]/i);
-        const isLeadCompleted = /\[LEAD_COMPLETED\]/i.test(aiResponse) || /(העברתי את כל הפרטים|העברתי את הפרטים לצוות|ניצור איתך קשר בהקדם)/.test(aiResponse);
-        const isUrgent = /(דחוף|בהקדם|תתקשרו אלי|תחזרו אלי|שיחזרו אלי|צרו איתי קשר|לחוץ)/i.test(userText);
+        const isLeadCompleted = /\[LEAD_COMPLETED\]/i.test(aiResponse);
+        const isUrgent = /(?:דחוף|בדחיפות|בהקדם האפשרי|תתקשרו אלי|תחזרו אלי דחוף|שיחזרו אלי דחוף|רוצה לדבר עם נגר)/i.test(userText);
 
         const cleanResponseText = aiResponse
             .replace(/\[GENERATE_MOCKUP:\s*[^\]]+\]/gi, '')
