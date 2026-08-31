@@ -387,7 +387,6 @@ async function sendTelegramMessage(chatId: number, text: string, replyToMessageI
 
     for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
-        // Only attach reply_to_message_id to the first chunk
         const replyParam = (i === 0 && replyToMessageId) ? replyToMessageId : undefined;
         try {
             const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -406,14 +405,25 @@ async function sendTelegramMessage(chatId: number, text: string, replyToMessageI
                 const errBody = await res.text();
                 console.error(`[Telegram] sendMessage failed (${res.status}):`, errBody);
 
-                if (res.status === 400 && errBody.includes("can't parse")) {
+                // Fallback 1: Plain text with reply
+                let fallbackRes = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: chatId,
+                        text: chunk,
+                        reply_to_message_id: replyParam,
+                    }),
+                });
+
+                // Fallback 2: Plain text without reply
+                if (!fallbackRes.ok) {
                     await fetch(url, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             chat_id: chatId,
                             text: chunk,
-                            reply_to_message_id: replyParam,
                         }),
                     });
                 }
@@ -663,17 +673,8 @@ export default async function handler(
 
         // --- Admin Group Assistant Flow ---
         if (isGroupChat) {
-            const isReplyToBot = message.reply_to_message?.from?.is_bot === true || !!message.reply_to_message;
-            const isMentionOrQuestion = /@\w*bot\b/i.test(userText) || /(?:בוט|ליד|שאלה|תסכם|סכם|פרטים|כמה מטר|איזה צבע|מה הטלפון|מה הלקוח|מי הלקוח|מה הסטטוס|מה הוא רוצה|מה הוא ביקש|מה המידות|איזה חומר|כמה עולה|איזה עץ|הצעת מחיר)/i.test(userText);
-
-            if (isReplyToBot || isMentionOrQuestion || chatId === ADMIN_GROUP_ID) {
-                console.log(`[Admin Group Assistant] Query from ${firstName} in chat ${chatId}: "${userText}"`);
-                await handleAdminGroupQuestion(chatId, message.message_id, userText, message.reply_to_message, firstName);
-                res.status(200).json({ ok: true });
-                return;
-            }
-
-            // Casual group chatter not directed to the bot
+            console.log(`[Admin Group Assistant] Query from ${firstName} in chat ${chatId}: "${userText}"`);
+            await handleAdminGroupQuestion(chatId, message.message_id, userText, message.reply_to_message, firstName);
             res.status(200).json({ ok: true });
             return;
         }
