@@ -325,9 +325,9 @@ async function callGemini(history: ChatMessage[], userMessage: string): Promise<
             model: GEMINI_MODEL,
             contents,
             config: {
-                temperature: 0.3,
+                temperature: 0.35,
                 topP: 0.85,
-                maxOutputTokens: 500,
+                maxOutputTokens: 300,
                 systemInstruction: SYSTEM_INSTRUCTION,
             },
         });

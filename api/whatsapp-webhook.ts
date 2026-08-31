@@ -427,9 +427,9 @@ async function generateIanResponse(
             model: GEMINI_MODEL,
             contents,
             config: {
-                temperature: 0.3,
+                temperature: 0.35,
                 topP: 0.85,
-                maxOutputTokens: 500,
+                maxOutputTokens: 300,
                 systemInstruction,
             },
         });
@@ -445,8 +445,8 @@ async function generateIanResponse(
             model: GEMINI_FALLBACK_MODEL,
             contents,
             config: {
-                temperature: 0.3,
-                maxOutputTokens: 500,
+                temperature: 0.35,
+                maxOutputTokens: 300,
                 systemInstruction,
             },
         });
