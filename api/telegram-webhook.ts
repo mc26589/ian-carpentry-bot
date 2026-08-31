@@ -50,9 +50,25 @@ interface TelegramUpdate {
 
 // --- System Instructions (Authentic Hebrew Carpenter Persona) ---
 
-import { buildTelegramSystemInstruction } from './knowledge-base.js';
+import { buildTelegramSystemInstruction, MAX_DAILY_MOCKUPS, MOCKUP_DAILY_LIMIT_MESSAGE } from './knowledge-base.js';
 
 const SYSTEM_INSTRUCTION = buildTelegramSystemInstruction(null, '');
+
+async function checkAndIncrementTelegramDailyMockups(userId: number): Promise<{ allowed: boolean; count: number }> {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const key = `mockup_count:${userId}:${todayStr}`;
+    try {
+        const count = (await kv.get<number>(key)) || 0;
+        if (count >= MAX_DAILY_MOCKUPS) {
+            return { allowed: false, count };
+        }
+        await kv.set(key, count + 1, { ex: 86400 });
+        return { allowed: true, count: count + 1 };
+    } catch (err) {
+        console.error('[Telegram Mockup Limit] Error:', err);
+        return { allowed: true, count: 1 };
+    }
+}
 
 // --- Session Management ---
 
@@ -457,10 +473,16 @@ export default async function handler(
             .trim();
 
         if (mockupMatch) {
-            const imagePrompt = mockupMatch[1].trim();
-            console.log(`[Telegram AI Mockup Triggered] Prompt: "${imagePrompt}"`);
-            const imageUrl = buildMockupImageUrl(imagePrompt);
-            await sendTelegramPhoto(chatId, imageUrl, '🪵 הדמיה בעיצוב אישי - נגריית איאן');
+            const limitCheck = await checkAndIncrementTelegramDailyMockups(userId);
+            if (!limitCheck.allowed) {
+                console.log(`[Telegram Mockup Limit] User ${userId} reached daily limit (${limitCheck.count}/${MAX_DAILY_MOCKUPS})`);
+                await sendTelegramMessage(chatId, `⚠️ ${MOCKUP_DAILY_LIMIT_MESSAGE}`);
+            } else {
+                const imagePrompt = mockupMatch[1].trim();
+                console.log(`[Telegram AI Mockup Triggered] (${limitCheck.count}/${MAX_DAILY_MOCKUPS}) Prompt: "${imagePrompt}"`);
+                const imageUrl = buildMockupImageUrl(imagePrompt);
+                await sendTelegramPhoto(chatId, imageUrl, `🪵 הדמיה בעיצוב אישי (${limitCheck.count}/${MAX_DAILY_MOCKUPS}) - נגריית איאן`);
+            }
         }
 
         const savedText = cleanResponseText || aiResponse;

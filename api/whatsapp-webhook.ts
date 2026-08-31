@@ -85,10 +85,31 @@ interface WhatsAppWebhookBody {
     }>;
 }
 
-import { buildWhatsAppSystemInstruction } from './knowledge-base.js';
+import { buildWhatsAppSystemInstruction, MAX_DAILY_MOCKUPS, MOCKUP_DAILY_LIMIT_MESSAGE } from './knowledge-base.js';
 
 function buildDynamicSystemInstruction(lead: LeadProfile | null, customerName: string): string {
     return buildWhatsAppSystemInstruction(lead, customerName);
+}
+
+async function getDailyMockupCount(phone: string): Promise<number> {
+    try {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const startOfDay = new Date(`${todayStr}T00:00:00.000Z`).toISOString();
+        const { count, error } = await supabase
+            .from('carpentry_messages')
+            .select('*', { count: 'exact', head: true })
+            .eq('phone', phone)
+            .eq('role', 'model')
+            .gte('created_at', startOfDay)
+            .ilike('content', '%[הדמיה בעיצוב אישי%');
+
+        if (!error && typeof count === 'number') {
+            return count;
+        }
+    } catch (err) {
+        console.error('[WhatsApp Mockup Limit] Error checking count:', err);
+    }
+    return 0;
 }
 
 
@@ -646,23 +667,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
                         .trim();
 
                     // 1. Send outbound WhatsApp reply (Mockup Image + Text) IMMEDIATELY
+                    let mockupSent = false;
                     if (effectivePhoneId) {
                         if (mockupMatch) {
-                            const imagePrompt = mockupMatch[1].trim();
-                            console.log(`[AI Mockup Triggered] Prompt: "${imagePrompt}"`);
-                            const imageUrl = buildMockupImageUrl(imagePrompt);
-                            
-                            // Send mockup image first
-                            await sendImageMessage(
-                                effectivePhoneId,
-                                customerPhone,
-                                imageUrl,
-                                '🪵 הדמיה בעיצוב אישי - נגריית איאן'
-                            );
-                            
-                            // Send accompanying conversational text
-                            if (cleanResponseText) {
-                                await sendTextMessage(effectivePhoneId, customerPhone, cleanResponseText);
+                            const currentMockupsToday = await getDailyMockupCount(customerPhone);
+                            if (currentMockupsToday >= MAX_DAILY_MOCKUPS) {
+                                console.log(`[WhatsApp Mockup Limit] ${customerPhone} reached daily limit (${currentMockupsToday}/${MAX_DAILY_MOCKUPS})`);
+                                const replyMsg = cleanResponseText
+                                    ? `${cleanResponseText}\n\n⚠️ ${MOCKUP_DAILY_LIMIT_MESSAGE}`
+                                    : MOCKUP_DAILY_LIMIT_MESSAGE;
+                                await sendTextMessage(effectivePhoneId, customerPhone, replyMsg);
+                            } else {
+                                const imagePrompt = mockupMatch[1].trim();
+                                const mockupNumber = currentMockupsToday + 1;
+                                console.log(`[AI Mockup Triggered] (${mockupNumber}/${MAX_DAILY_MOCKUPS}) Prompt: "${imagePrompt}"`);
+                                const imageUrl = buildMockupImageUrl(imagePrompt);
+                                
+                                // Send mockup image first
+                                await sendImageMessage(
+                                    effectivePhoneId,
+                                    customerPhone,
+                                    imageUrl,
+                                    `🪵 הדמיה בעיצוב אישי (${mockupNumber}/${MAX_DAILY_MOCKUPS}) - נגריית איאן`
+                                );
+                                mockupSent = true;
+                                
+                                // Send accompanying conversational text
+                                if (cleanResponseText) {
+                                    await sendTextMessage(effectivePhoneId, customerPhone, cleanResponseText);
+                                }
                             }
                         } else if (cleanResponseText) {
                             await sendTextMessage(effectivePhoneId, customerPhone, cleanResponseText);
@@ -672,7 +705,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
                     }
 
                     // 2. Persist messages, update structured memory in DB, and send Telegram alert if completed or urgent
-                    const savedText = cleanResponseText || aiResponse;
+                    let savedText = cleanResponseText || aiResponse;
+                    if (mockupSent) {
+                        savedText = `[הדמיה בעיצוב אישי] ${savedText}`;
+                    }
                     const postTasks: Promise<any>[] = [
                         saveMessage(customerPhone, 'user', userText),
                         saveMessage(customerPhone, 'model', savedText),
