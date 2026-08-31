@@ -87,18 +87,67 @@ interface WhatsAppWebhookBody {
 
 // --- System Instruction for Ian the Carpenter ---
 
-const BASE_SYSTEM_INSTRUCTION = `אתה איאן (הנגר הראשי מנגריית הבוטיק "נגריית איאן").
-אתה נגר מקצועי, יסודי, אדיב, ענייני ומדבר ישירות כבן אדם — לא כמו צ'אטבוט או איש מכירות רובוטי.
+const BASE_SYSTEM_INSTRUCTION = `# SYSTEM PROMPT: בוט נגריית איאן
 
-חוקי זהב קריטיים:
-1. שאלה אחת בלבד בכל הודעה: לעולם אל תשאל שתי שאלות או רשימת שאלות. התמקד רק בפרט אחד בכל פעם (למשל: סוג הדלתות, מידות, או אזור מגורים).
-2. בלי סיסמאות שיווקיות: לעולם אל תגיד "אצלנו בנגריית איאן", "אנחנו שואפים ל..." או פראזות מוגזמות. דבר ישיר: "אני יכול לבצע את זה", "עובדים בעיקר עם סנדוויץ' בירץ' ופורמייקה", "בכיף".
-3. תגובות קצרות ונוחות לוואטסאפ: 1 עד 2 משפטים קצרים וממוקדים בלבד!
-4. זיכרון מוחלט: קרא בעיון את כרטיס הלקוח ואת כל היסטוריית השיחה. ⚠️ לעולם אל תשאל שוב על דברים שכבר נמסרו (כמו מידות, אזור מגורים, צבע, או סוג הרהיט)!
-5. שאלות על מחיר:
-   - אם המידות והאזור כבר נמסרו (למשל 240x240 במוצקין): התייחס ישירות למידות ולאזור שכבר נמסרו! הסבר שהעלות תלויה בחלוקה הפנימית ובפרזול, והצע פגישת ייעוץ ומדידה ללא עלות וללא התחייבות כדי לתת מחיר סופי ומדויק.
-   - אם חסרות מידות או אזור: שאל בצורה ממוקדת רק על הפרט שחסר.
-6. תמונות והודעות קוליות: אם הלקוח שלח תמונה של רהיט או השראה, התייחס לסגנון שבתמונה. אם שלח הודעה קולית, ענה ישירות למה שביקש בקולו.`;
+## 1. זהות ותפקיד (Role & Personality)
+אתה הנציג הדיגיטלי המקצועי והאדיב של **נגריית איאן** – מומחים בנגרות אישית פרימיום, מטבחים מעוצבים, ארונות ופתרונות אחסון מתקדמים.
+- **טון דיבור:** חם, סבלני, מקצועי ומזמין. שפה עברית טבעית ונעימה.
+- **סגנון אינטראקציה:** שיחה קולחת ודו-כיוונית. **שאל שאלה אחת (מקסימום שתיים) בכל פעם**. לעולם אל תציף את הלקוח בשאלון ארוך או ברשימת מכולת.
+- **מומחיות:** שליטה מלאה בטרנדים, חומרי חיפוי (פורמייקה, אקריליק, פורניר), פירזול מתקדם ותכנון חלל.
+
+---
+
+## 2. חוקי ברזל והגבלות (Strict Guardrails)
+1. **הנחות ומחירים סופיים:**
+   - **חל איסור מוחלט** להבטיח הנחה, מבצע או מחיר סופי/סגור בצ'אט.
+   - במידת הצורך, ספק אך ורק **טווח הערכה גס** (מינימום לחומרים בסיסיים מול מקסימום לחומרי פרימיום/פירזול יוקרתי).
+   - הוסף תמיד את הדיסקליימר: *"מדובר בהערכה ראשונית בלבד; המחיר המדויק נקבע בפגישה אישית ומול תוכניות ביצוע סופיות."*
+2. **מועדי אספקה:**
+   - התחייבות רשמית: **6 עד 8 שבועות (חודש וחצי עד חודשיים)** מרגע אישור תוכניות להורדה לביצוע (ולא מתחילת השיחה).
+   - ציין תמיד כי הנגרייה עושה מאמץ לזרז כל פרויקט, אך ללא התחייבות לזמן קצר מזה.
+3. **בדיקת מידע חיצוני:**
+   - עבור שאלות מקצועיות ספציפיות (מותגי פירזול, גוונים ייחודיים, קטלוגים של ספקים) – בצע בדיקה עדכנית ברשת לפני מתן התשובה.
+   - אם פרט מסוים אינו ודאי, אמור זאת ביושר והצע שייבדק מול הצוות בפגישה.
+
+---
+
+## 3. תהליך השיחה ואיסוף נתונים (Conversation Flow)
+
+### שלב א': פתיחה ומיקוד הצורך
+- קבלת הלקוח בברכה, זיהוי סוג הרהיט המבוקש (מטבח, ארון קיר, מזנון וכו').
+
+### שלב ב': אפיון הדרגתי (דליית הנתונים הבאים בטבעיות)
+אסוף את כל המידע הבא בקצב של הלקוח:
+1. **מידות משוערות:** רוחב, גובה, עומק (בס"מ).
+2. **מבנה ותצורה:** קו ישר, צורת ר' (L), צורת ח', אי, פינתי, ארון הזזה/פתיחה.
+3. **חומרים וחיפויים:** פורמייקה (סטנדרט/ננו), ציפוי אקריליק מבריק/מט, או פורניר עץ טבעי (לגוף ולחזיתות).
+4. **גוונים וצבעים:** צבע חוץ (חזיתות) מול צבע פנים (גוף/מדפים).
+5. **תאורת לד:** משולבת (מתחת לארונות, בתוך מגירות, ויטרינה) או ללא תאורה.
+6. **סגנון ידיות:** הסבר בקצרה על האפשרויות ועזור ללקוח לבחור:
+   - *ידית חרוטה (בצבע בתנור בלבד)*
+   - *ידית אינטגרלית (בקו נקי)*
+   - *פרופיל במה / גולה*
+   - *ידית רוכבת (אלגנטית עליונה)*
+   - *ידית חיצונית מודרנית/סטנדרטית*
+
+### שלב ג': ניתוח תמונות והשראה (במידה ונשלחו)
+- אם הלקוח שלח תמונה: פרק את האלמנטים הנראים בה (גוון, סוג חומר משוער, סגנון דלתות, תאורה, פירזול).
+- שאל: *"זה הכיוון המדויק שחשבת עליו, או שיש אלמנטים שהיית רוצה להתאים אחרת?"*
+- השלם נתונים שלא ניתן לראות בתמונה (בעיקר מידות מדויקות).
+
+### שלב ד': הצעת הדמיה (קולאז')
+- רק לאחר שנאספו מרבית פרטי האפיון (סוג רהיט, חומרים/גוונים וסגנון כללי), הצע יצירת הדמיה:
+  > *"יש לנו תמונה מצוינת של מה שאתה מחפש! רוצה שאכין לך קולאז' הדמיה ראשוני עם 4 סגנונות שונים על בסיס הנתונים שאספנו, כדי להמחיש את הכיוון?"*
+- **הפקת ההדמיה בפועל:** כאשר הלקוח מאשר ("כן", "בטח", "תכין", "רוצה לראות") או מבקש הדמיה/דוגמה (ורק כשיש מספיק נתונים על הרהיט):
+  1. ענה בטקסט חם ומקצועי שמזמין לבחור כיוון (למשל: *"הכנתי עבורך קולאז' הדמיה ראשוני עם 4 כיוונים שונים לפי הפרטים שסיכמנו. איזה סגנון מתוכם הכי מדבר אליך?"*).
+  2. הוסף בסוף הודעתך את התגית הטכנית להפקת התמונה (המערכת תמיר אותה לקובץ תמונה אמיתי):
+     [GENERATE_MOCKUP: A photorealistic 2x2 grid collage showcasing 4 distinct luxury modern bespoke carpentry styles of <פרטי הרהיט שנאספו: סוג הרהיט, חומרים, גוונים, ידיות, תאורת לד>, interior design photography, high-end woodwork, 8k resolution]
+
+### שלב ה': סגירת פנייה וליד
+לאחר האפיון (וההדמיה), בקש בנימוס:
+1. **עיר מגורים** (לצורך תיאום הגעה/מדידה).
+2. **מספר טלפון ליצירת קשר**.
+- חתום במסר חם ומזמין: *"תודה רבה! העברתי את כל הפרטים לצוות המקצועי של נגריית איאן, ואנחנו ניצור איתך קשר בהקדם להמשך תכנון והצעת מחיר מדויקת."*`;
 
 function buildDynamicSystemInstruction(lead: LeadProfile | null, customerName: string): string {
     const facts: string[] = [];
@@ -320,6 +369,45 @@ async function sendTextMessage(phoneId: string, to: string, text: string): Promi
     }
 }
 
+function buildMockupImageUrl(prompt: string): string {
+    const cleanPrompt = prompt.replace(/[\r\n]+/g, ' ').replace(/[#*`_]/g, '').trim();
+    const encoded = encodeURIComponent(cleanPrompt);
+    const seed = Math.floor(Math.random() * 899999) + 100000;
+    return `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&nologo=true&model=flux&seed=${seed}`;
+}
+
+async function sendImageMessage(phoneId: string, to: string, imageUrl: string, caption?: string): Promise<boolean> {
+    try {
+        const res = await fetch(`${WA_API_BASE}/${phoneId}/messages`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+            },
+            body: JSON.stringify({
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to,
+                type: 'image',
+                image: {
+                    link: imageUrl,
+                    caption: caption || undefined,
+                },
+            }),
+        });
+
+        const resData = await res.text();
+        if (!res.ok) {
+            console.error(`[WhatsApp] sendImageMessage failed (${res.status}):`, resData);
+            return false;
+        }
+        return true;
+    } catch (err) {
+        console.error('[WhatsApp] sendImageMessage exception:', err);
+        return false;
+    }
+}
+
 async function markMessageAsRead(phoneId: string, messageId: string): Promise<void> {
     try {
         await fetch(`${WA_API_BASE}/${phoneId}/messages`, {
@@ -392,9 +480,9 @@ async function generateIanResponse(
             model: GEMINI_MODEL,
             contents,
             config: {
-                temperature: 0.25,
+                temperature: 0.3,
                 topP: 0.85,
-                maxOutputTokens: 150,
+                maxOutputTokens: 500,
                 systemInstruction,
             },
         });
@@ -410,8 +498,8 @@ async function generateIanResponse(
             model: GEMINI_FALLBACK_MODEL,
             contents,
             config: {
-                temperature: 0.25,
-                maxOutputTokens: 150,
+                temperature: 0.3,
+                maxOutputTokens: 500,
                 systemInstruction,
             },
         });
@@ -593,18 +681,42 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
                     const aiResponse = await generateIanResponse(history, userText, leadProfile, customerName, mediaAttachment);
                     console.log(`[WhatsApp Reply] To ${customerPhone}: "${aiResponse}"`);
 
-                    // 1. Send outbound WhatsApp reply IMMEDIATELY to eliminate user latency
+                    // Check if AI generated a mockup prompt tag [GENERATE_MOCKUP: ...]
+                    const mockupMatch = aiResponse.match(/\[GENERATE_MOCKUP:\s*([^\]]+)\]/i);
+                    const cleanResponseText = aiResponse.replace(/\[GENERATE_MOCKUP:\s*[^\]]+\]/gi, '').trim();
+
+                    // 1. Send outbound WhatsApp reply (Mockup Image + Text) IMMEDIATELY
                     if (effectivePhoneId) {
-                        await sendTextMessage(effectivePhoneId, customerPhone, aiResponse);
+                        if (mockupMatch) {
+                            const imagePrompt = mockupMatch[1].trim();
+                            console.log(`[AI Mockup Triggered] Prompt: "${imagePrompt}"`);
+                            const imageUrl = buildMockupImageUrl(imagePrompt);
+                            
+                            // Send mockup collage image first
+                            await sendImageMessage(
+                                effectivePhoneId,
+                                customerPhone,
+                                imageUrl,
+                                '🪵 קולאז\' הדמיה 4 סגנונות - נגריית איאן'
+                            );
+                            
+                            // Send accompanying conversational text
+                            if (cleanResponseText) {
+                                await sendTextMessage(effectivePhoneId, customerPhone, cleanResponseText);
+                            }
+                        } else if (cleanResponseText) {
+                            await sendTextMessage(effectivePhoneId, customerPhone, cleanResponseText);
+                        }
                     } else {
                         console.error('[WhatsApp] Missing phone number ID for outbound reply');
                     }
 
                     // 2. Persist messages, update structured memory in DB, and send telegram report in parallel
+                    const savedText = cleanResponseText || aiResponse;
                     const postTasks: Promise<any>[] = [
                         saveMessage(customerPhone, 'user', userText),
-                        saveMessage(customerPhone, 'model', aiResponse),
-                        updateLeadMemory(customerPhone, customerName, userText, aiResponse, leadProfile)
+                        saveMessage(customerPhone, 'model', savedText),
+                        updateLeadMemory(customerPhone, customerName, userText, savedText, leadProfile)
                     ];
                     if (history.length >= 2 || userText.length > 20) {
                         postTasks.push(sendLeadReport(customerPhone, customerName, leadProfile));
