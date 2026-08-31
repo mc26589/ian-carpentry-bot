@@ -9,6 +9,8 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
 const ADMIN_GROUP_ID = parseInt(process.env.ADMIN_GROUP_ID || '0', 10);
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || '';
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || '';
 
 // --- Constants ---
 const GEMINI_MODEL = 'gemini-3.5-flash-lite';
@@ -16,6 +18,7 @@ const MAX_HISTORY_MESSAGES = 20;
 const HISTORY_TTL_SECONDS = 86400; // 24 hours — so customers can resume conversations
 const TG_MAX_LENGTH = 4096;
 const ACTIVE_USERS_KEY = 'active_bot_users';
+const WA_API_BASE = 'https://graph.facebook.com/v21.0';
 
 // --- Supabase Client (for cross-platform WhatsApp lead queries) ---
 const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
@@ -434,6 +437,62 @@ async function sendTelegramMessage(chatId: number, text: string, replyToMessageI
     }
 }
 
+// --- WhatsApp Outbound Messaging Helper (from Admin Task Execution) ---
+
+async function sendWhatsAppMessageFromAdmin(toPhone: string, text: string): Promise<boolean> {
+    if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+        console.error('[WhatsApp Outbound] Missing credentials in environment');
+        return false;
+    }
+
+    let formattedPhone = toPhone.replace(/\D/g, '');
+    if (formattedPhone.startsWith('0')) {
+        formattedPhone = '972' + formattedPhone.slice(1);
+    }
+
+    try {
+        const res = await fetch(`${WA_API_BASE}/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+            },
+            body: JSON.stringify({
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to: formattedPhone,
+                type: 'text',
+                text: { preview_url: false, body: text },
+            }),
+        });
+
+        if (!res.ok) {
+            const errData = await res.text();
+            console.error(`[WhatsApp Outbound] Failed (${res.status}):`, errData);
+            return false;
+        }
+
+        // Persist message in Supabase so the customer's chat history remains seamless
+        if (supabase) {
+            await supabase.from('carpentry_messages').insert({
+                phone: formattedPhone,
+                role: 'model',
+                content: text,
+            });
+            await supabase.from('carpentry_leads').update({
+                updated_at: new Date().toISOString(),
+                notes: `נשלחה הודעת מנהל: "${text.length > 80 ? text.substring(0, 80) + '...' : text}"`
+            }).eq('phone', formattedPhone);
+        }
+
+        console.log(`[WhatsApp Outbound] Successfully sent message to ${formattedPhone}`);
+        return true;
+    } catch (err) {
+        console.error('[WhatsApp Outbound] Exception:', err);
+        return false;
+    }
+}
+
 // --- Admin Group Copilot & Lead Intelligence Assistant ---
 
 async function handleAdminGroupQuestion(
@@ -529,6 +588,7 @@ async function handleAdminGroupQuestion(
 
     // 4. Build Context for Gemini
     let leadContext = '';
+    const effectiveTargetPhone = targetPhone || leadData?.phone || '';
     if (leadData) {
         leadContext += `\n📋 נתוני הליד מתוך ה-Database:\n`;
         leadContext += `• שם הלקוח: ${leadData.customer_name || 'לא צוין'}\n`;
@@ -553,14 +613,20 @@ async function handleAdminGroupQuestion(
         });
     }
 
-    const adminSystemPrompt = `אתה העוזר הניהולי המקצועי והחכם של "נגריית איאן" בקבוצת המנהלים בטלגרם.
-המנהלים/הנגרים שואלים אותך שאלות על לידים, לקוחות, שיחות שנוהלו, הצעות מחיר, חומרים ומפרטים.
+    const adminSystemPrompt = `אתה העוזר הניהולי והמבצעי של "נגריית איאן" בקבוצת המנהלים בטלגרם.
+המנהלים/הנגרים שואלים אותך שאלות על לידים, לקוחות, שיחות שנוהלו, מחירונים ומפרטים, ונותנים לך משימות ליצירת קשר עם לקוחות בוואטסאפ!
 
 תפקידך:
 1. ענה ישירות, במקצועיות, בבהירות ובדיוק על שאלת המנהל (${senderName || 'המנהל'}).
 2. הסתמך במדויק על נתוני הליד ותמליל השיחה המצורפים.
 3. אם המנהל שואל שאלות מקצועיות/טכניות (כגון מחירי מטר רץ, קטלוגים של פורמקס/בלורן/חג סחר, גווני טמבור/נירלט, מגירות בלום או דומיסיל), ספק מידע מקצועי מדויק ממאגר הידע של הנגרייה.
-4. אם חסר פרט מסוים בשיחה (למשל הלקוח עוד לא החליט על גוון או לא מסר מידה סופית), ציין זאת ביושר.
+
+⚡ ביצוע משימות ושליחת הודעות לוואטסאפ:
+כאשר המנהל מבקש ממך לבצע פעולה מול הלקוח בוואטסאפ (כגון: "תשלח לו הודעה שאנחנו נותנים 10% הנחה", "תכתוב לו שאיאן יגיע מחר למדוד", "תציע לו מחיר מיוחד", "תשאל אותו אם מתאים לו שנתקשר"):
+- נסח הודעת וואטסאפ אישית, חמה, מנומסת ומקצועית ללקוח (בשם נגריית איאן).
+- חובה להוסיף בסוף תשובתך את תגית הביצוע:
+[SEND_WHATSAPP: ${effectiveTargetPhone || '<מספר טלפון>'} | <תוכן ההודעה המלאה שתישלח ללקוח בוואטסאפ>]
+- בתשובתך למנהל בטלגרם, אשר שאתה שולח את ההודעה והצג לו את נוסח ההודעה.
 
 נתוני הרקע והשיחה:
 ${leadContext || 'לא נמצאו נתוני לקוח ספציפיים.'}
@@ -572,13 +638,41 @@ ${leadContext || 'לא נמצאו נתוני לקוח ספציפיים.'}
             contents: [{ role: 'user', parts: [{ text: adminText }] }],
             config: {
                 temperature: 0.3,
-                maxOutputTokens: 500,
+                maxOutputTokens: 600,
                 systemInstruction: adminSystemPrompt,
             }
         });
 
         const reply = response.text?.trim() || 'לא הצלחתי לנתח את הנתונים כרגע.';
-        await sendTelegramMessage(chatId, reply, messageId);
+
+        // Check for WhatsApp execution tag
+        const whatsappMatch = reply.match(/\[SEND_WHATSAPP:\s*([^\|\]]+)\|\s*([^\]]+)\]/i);
+        let executionResultNote = '';
+
+        if (whatsappMatch) {
+            const rawPhone = whatsappMatch[1].trim();
+            const messageToSend = whatsappMatch[2].trim();
+            const effectivePhone = rawPhone || targetPhone || leadData?.phone;
+
+            if (effectivePhone) {
+                console.log(`[Admin Action] Sending WhatsApp to ${effectivePhone}: "${messageToSend}"`);
+                const sent = await sendWhatsAppMessageFromAdmin(effectivePhone, messageToSend);
+                if (sent) {
+                    executionResultNote = `\n\n✅ *ההודעה נשלחה בהצלחה ללקוח בוואטסאפ!* 📲\n💬 *" ${messageToSend} "*`;
+                } else {
+                    executionResultNote = `\n\n⚠️ *ניסיתי לשלוח את ההודעה בוואטסאפ אך חלה שגיאה בתקשורת מול Meta.*`;
+                }
+            } else {
+                executionResultNote = `\n\n⚠️ *לא זוהה מספר טלפון לשליחת ההודעה בוואטסאפ.*`;
+            }
+        }
+
+        const cleanReply = reply
+            .replace(/\[SEND_WHATSAPP:\s*[^\|\]]+\|\s*[^\]]+\]/gi, '')
+            .trim();
+
+        const finalTelegramMessage = executionResultNote ? `${cleanReply}${executionResultNote}` : cleanReply;
+        await sendTelegramMessage(chatId, finalTelegramMessage, messageId);
     } catch (err) {
         console.error('[Admin Query] Gemini generation error:', err);
         await sendTelegramMessage(chatId, 'אירעה שגיאה בעיבוד השאלה על הליד.', messageId);
