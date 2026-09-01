@@ -1,10 +1,10 @@
 param(
-    [string]$Token = $(if ($env:TELEGRAM_BOT_TOKEN) { $env:TELEGRAM_BOT_TOKEN } else { "8668769747:AAFFKofq4oKS2pXjeHrcm2mfqANCXIJbDD0" }),
+    [string]$Token = $env:TELEGRAM_BOT_TOKEN,
     [string]$Domain = $(if ($env:VERCEL_DOMAIN) { $env:VERCEL_DOMAIN } else { "ian-carpentry.vercel.app" })
 )
 
 if (-not $Token) {
-    Write-Host "Error: TELEGRAM_BOT_TOKEN not set" -ForegroundColor Red
+    Write-Host "Error: TELEGRAM_BOT_TOKEN is not set. Please set the TELEGRAM_BOT_TOKEN environment variable or pass -Token." -ForegroundColor Red
     exit 1
 }
 
